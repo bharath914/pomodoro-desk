@@ -2,3 +2,6 @@
 *.o
 *.obj
 *.pdb
+linux/pomodoro
+.build/
+*.swiftpm

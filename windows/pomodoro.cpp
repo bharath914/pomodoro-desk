@@ -1,13 +1,15 @@
-// Minimal always-on-top focus-timer overlay for Windows (Win32 + GDI, no dependencies)
+// Minimal always-on-top focus-timer overlay for Windows (Win32 + GDI, no dependencies).
+// All countdown logic lives in ../core/TimerEngine — this file is UI/rendering only.
 //
-// Build (MinGW):  g++ -O2 -s -mwindows -static pomodoro.cpp -o pomodoro.exe -lgdi32 -luser32 -lcomctl32
-// Build (MSVC):   cl /O2 /EHsc pomodoro.cpp user32.lib gdi32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
+// Build (MinGW):  g++ -O2 -s -mwindows -static pomodoro.cpp ../core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32 -lcomctl32
+// Build (MSVC):   cl /O2 /EHsc pomodoro.cpp ..\core\TimerEngine.cpp user32.lib gdi32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
 //
 // Drag anywhere to move. Hover to reveal controls. Space = start/pause. Right-click = menu (duration/custom/quit).
 
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include "../core/TimerEngine.h"
 
 // ---------- palette (flat, Apple-dark inspired) ----------
 static const COLORREF kBg      = RGB(22, 22, 24);
@@ -19,21 +21,19 @@ static const COLORREF kGray    = RGB(142, 142, 147);
 static const COLORREF kRed     = RGB(255, 69, 58);
 static const COLORREF kOrange  = RGB(255, 159, 10);
 
-static HINSTANCE g_hinst;
-static HWND      g_main = nullptr;
-static HWND      g_popup = nullptr;
-static HWND      g_editCtl = nullptr;
+static HINSTANCE   g_hinst;
+static HWND        g_main = nullptr;
+static HWND        g_popup = nullptr;
+static HWND        g_editCtl = nullptr;
 
-static bool       g_running = false;
-static bool       g_hover = false;
-static long long  g_durationMs = 25 * 60 * 1000LL;  // currently selected preset
-static long long  g_remainMs   = g_durationMs;       // authoritative when paused
-static ULONGLONG  g_endTick = 0;                      // authoritative when running
-static int        g_shownSecs = -1;
-static int        g_dpi = 96;
-static HFONT      g_fTime, g_fLabel, g_fBtnIcon, g_fBtnText, g_fPopup;
+static TimerEngine g_timer(25);
+static bool        g_hover = false;
+static int         g_shownSecs = -1;
+static int         g_dpi = 96;
+static HFONT       g_fTime, g_fLabel, g_fBtnIcon, g_fBtnText, g_fPopup;
 
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
+static int64_t Now() { return (int64_t)GetTickCount64(); }
 
 // ---------- layout (96-dpi units) ----------
 static const int W = 216, H = 130;
@@ -61,6 +61,7 @@ static int HitButton(POINT p) {
     return -1;
 }
 
+// Parses a user-typed wide string into an integer (used for the custom-minutes edit box).
 static int ParseInt(const wchar_t* s) {
     int v = 0;
     for (; *s; s++) {
@@ -70,50 +71,17 @@ static int ParseInt(const wchar_t* s) {
     return v;
 }
 
-static int SecsLeft() {
-    long long ms = g_running ? (long long)(g_endTick - GetTickCount64()) : g_remainMs;
-    if (ms < 0) ms = 0;
-    return (int)((ms + 999) / 1000);
-}
-
-static void Toggle() {
-    if (g_running) {
-        g_remainMs = (long long)(g_endTick - GetTickCount64());
-        if (g_remainMs < 0) g_remainMs = 0;
-        g_running = false;
-    } else {
-        if (g_remainMs <= 0) g_remainMs = g_durationMs;
-        g_endTick = GetTickCount64() + g_remainMs;
-        g_running = true;
-    }
-}
-
-static void Reset(HWND h) {
-    g_running = false;
-    g_remainMs = g_durationMs;
-    InvalidateRect(h, nullptr, FALSE);
-}
-
-static void AddMinutes(HWND h, int m) {
-    long long add = (long long)m * 60 * 1000;
-    if (g_running) g_endTick += add;
-    else g_remainMs += add;
-    InvalidateRect(h, nullptr, FALSE);
-}
-
-static void SetDuration(HWND h, int minutes) {
-    g_durationMs = (long long)minutes * 60 * 1000;
-    Reset(h);
-}
+static void UiToggle(HWND h) { g_timer.toggle(Now()); InvalidateRect(h, nullptr, FALSE); }
+static void UiReset(HWND h) { g_timer.reset(); InvalidateRect(h, nullptr, FALSE); }
+static void UiAddMinutes(HWND h, int m) { g_timer.addMinutes(m); InvalidateRect(h, nullptr, FALSE); }
+static void UiSetDuration(HWND h, int minutes) { g_timer.setDuration(minutes); InvalidateRect(h, nullptr, FALSE); }
 
 static void CommitCustom() {
     if (!g_popup) return;
     wchar_t buf[16];
     GetWindowTextW(g_editCtl, buf, 16);
-    int mins = ParseInt(buf);
-    if (mins < 1) mins = 1;
-    if (mins > 999) mins = 999;
-    SetDuration(g_main, mins);
+    int mins = ClampMinutes(ParseInt(buf));
+    UiSetDuration(g_main, mins);
     DestroyWindow(g_popup);
 }
 
@@ -121,7 +89,7 @@ static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
     case WM_CREATE: {
         wchar_t init[8];
-        wsprintfW(init, L"%d", (int)(g_durationMs / 60000));
+        wsprintfW(init, L"%d", (int)(g_timer.durationMs() / 60000));
         HWND lbl = CreateWindowW(L"STATIC", L"Minutes (1-999):", WS_CHILD | WS_VISIBLE,
                                   S(10), S(8), S(160), S(18), h, nullptr, g_hinst, nullptr);
         g_editCtl = CreateWindowW(L"EDIT", init, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
@@ -173,16 +141,20 @@ static HMENU BuildMenu() {
 }
 
 static const wchar_t* StateLabel() {
-    if (g_running) return L"RUNNING";
-    if (SecsLeft() <= 0) return L"DONE";
-    if (g_remainMs < g_durationMs) return L"PAUSED";
-    return L"READY";
+    switch (g_timer.state()) {
+    case TimerState::Running: return L"RUNNING";
+    case TimerState::Done:    return L"DONE";
+    case TimerState::Paused:  return L"PAUSED";
+    default:                  return L"READY";
+    }
 }
 
 static COLORREF StateColor() {
-    if (g_running) return kBlue;
-    if (SecsLeft() <= 0) return kRed;
-    return kGray;
+    switch (g_timer.state()) {
+    case TimerState::Running: return kBlue;
+    case TimerState::Done:    return kRed;
+    default:                  return kGray;
+    }
 }
 
 static void Spaced(const wchar_t* in, wchar_t* out, size_t outCap) {
@@ -219,12 +191,13 @@ static void Paint(HWND h) {
     RECT lr = { 0, S(10), cr.right, S(26) };
     DrawText2(dc, lbl, lr, g_fLabel, StateColor(), DT_CENTER | DT_VCENTER);
 
-    int s = SecsLeft();
+    int64_t now = Now();
+    int s = g_timer.secsLeft(now);
     wchar_t buf[16];
     wsprintfW(buf, L"%02d:%02d", s / 60, s % 60);
     COLORREF timeColor = kFg;
-    if (!g_running && s <= 0) timeColor = kRed;
-    else if (g_running && s <= 60) timeColor = kOrange;
+    if (g_timer.state() == TimerState::Done) timeColor = kRed;
+    else if (g_timer.isRunning() && s <= 60) timeColor = kOrange;
     RECT tr = { 0, S(28), cr.right, S(86) };
     DrawText2(dc, buf, tr, g_fTime, timeColor, DT_CENTER | DT_VCENTER);
 
@@ -234,7 +207,7 @@ static void Paint(HWND h) {
         FillRect(dc, &rowBg, rowBrush);
         DeleteObject(rowBrush);
 
-        const wchar_t* glyph[B_COUNT] = { g_running ? L"❚❚" : L"▶", L"+5", L"+10", L"↺", L"✕" };
+        const wchar_t* glyph[B_COUNT] = { g_timer.isRunning() ? L"❚❚" : L"▶", L"+5", L"+10", L"↺", L"✕" };
         HFONT fonts[B_COUNT] = { g_fBtnIcon, g_fBtnText, g_fBtnText, g_fBtnIcon, g_fBtnIcon };
         HBRUSH bb = CreateSolidBrush(kBtn);
         for (int i = 0; i < B_COUNT; i++) {
@@ -282,10 +255,10 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     case WM_LBUTTONDOWN: {
         POINT p = { (short)LOWORD(l), (short)HIWORD(l) };
         switch (HitButton(p)) {
-        case B_PLAYPAUSE: Toggle(); InvalidateRect(h, nullptr, FALSE); break;
-        case B_PLUS5:  AddMinutes(h, 5); break;
-        case B_PLUS10: AddMinutes(h, 10); break;
-        case B_RESET:  Reset(h); break;
+        case B_PLAYPAUSE: UiToggle(h); break;
+        case B_PLUS5:  UiAddMinutes(h, 5); break;
+        case B_PLUS10: UiAddMinutes(h, 10); break;
+        case B_RESET:  UiReset(h); break;
         case B_CLOSE:  DestroyWindow(h); break;
         }
         return 0;
@@ -300,33 +273,31 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         int id = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, h, nullptr);
         DestroyMenu(menu);
         switch (id) {
-        case ID_DUR_25:  SetDuration(h, 25); break;
-        case ID_DUR_30:  SetDuration(h, 30); break;
-        case ID_DUR_45:  SetDuration(h, 45); break;
-        case ID_DUR_60:  SetDuration(h, 60); break;
-        case ID_DUR_120: SetDuration(h, 120); break;
+        case ID_DUR_25:  UiSetDuration(h, 25); break;
+        case ID_DUR_30:  UiSetDuration(h, 30); break;
+        case ID_DUR_45:  UiSetDuration(h, 45); break;
+        case ID_DUR_60:  UiSetDuration(h, 60); break;
+        case ID_DUR_120: UiSetDuration(h, 120); break;
         case ID_CUSTOM:  ShowCustomPopup(h); break;
         case ID_QUIT:    DestroyWindow(h); break;
         }
         return 0;
     }
     case WM_KEYDOWN:
-        if (w == VK_SPACE) { Toggle(); InvalidateRect(h, nullptr, FALSE); }
+        if (w == VK_SPACE) UiToggle(h);
         else if (w == VK_ESCAPE) DestroyWindow(h);
         return 0;
     case WM_TIMER:
-        if (g_running) {
-            long long left = (long long)(g_endTick - GetTickCount64());
-            if (left <= 0) {
-                g_running = false;
-                g_remainMs = 0;
+        if (g_timer.isRunning()) {
+            int64_t now = Now();
+            if (g_timer.update(now)) {
                 MessageBeep(MB_ICONEXCLAMATION);
                 FlashWindow(h, TRUE);
                 g_shownSecs = -1;
                 InvalidateRect(h, nullptr, FALSE);
-            } else {
-                g_remainMs = left;
-                if (SecsLeft() != g_shownSecs) { g_shownSecs = SecsLeft(); InvalidateRect(h, nullptr, FALSE); }
+            } else if (g_timer.secsLeft(now) != g_shownSecs) {
+                g_shownSecs = g_timer.secsLeft(now);
+                InvalidateRect(h, nullptr, FALSE);
             }
         }
         return 0;
