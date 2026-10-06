@@ -69,7 +69,7 @@ static int TextWidthPx(HDC dc, HFONT f, const wchar_t* text) {
 }
 
 static Layout ComputeLayout(HDC dc, int cw, int ch) {
-    int baseW = S(BASE_W), baseH = S(BASE_H);
+    int baseW = BASE_W, baseH = BASE_H;
     double sx = (double)cw / baseW, sy = (double)ch / baseH;
     double s = sx < sy ? sx : sy;
     int offX = (int)(cw - baseW * s) / 2;
@@ -80,18 +80,18 @@ static Layout ComputeLayout(HDC dc, int cw, int ch) {
     L.topbarClose = Xform(s, offX, offY, 422, 6, 28, 28);
     L.topbarMin   = Xform(s, offX, offY, 388, 6, 28, 28);
 
-    int tabPad = (int)(S(14) * s);
-    int tabH = (int)(S(46) * s);
+    int tabPad = (int)(14 * s);
+    int tabH = (int)(46 * s);
     int tabW[3];
     int totalTabW = 0;
     for (int i = 0; i < 3; i++) {
         tabW[i] = TextWidthPx(dc, g_fTab, kTabLabels[i]) + tabPad * 2;
         totalTabW += tabW[i];
     }
-    int trackPad = (int)(S(5) * s);
+    int trackPad = (int)(5 * s);
     int trackW = totalTabW + trackPad * 2;
     int trackX = offX + (int)(baseW * s) / 2 - trackW / 2;
-    int trackY = offY + (int)(S(54) * s);
+    int trackY = offY + (int)(54 * s);
     L.segTrack = { trackX, trackY, trackX + trackW, trackY + tabH + trackPad * 2 };
     int tx = trackX + trackPad;
     for (int i = 0; i < 3; i++) {
@@ -99,17 +99,17 @@ static Layout ComputeLayout(HDC dc, int cw, int ch) {
         tx += tabW[i];
     }
 
-    L.ringCx = offX + (int)(S(233) * s);
-    L.ringCy = offY + (int)(S(264) * s);
-    L.ringR = (int)(S(115) * s);
-    L.ringThickness = (int)(S(13) * s);
+    L.ringCx = offX + (int)(233 * s);
+    L.ringCy = offY + (int)(264 * s);
+    L.ringR = (int)(115 * s);
+    L.ringThickness = (int)(13 * s);
 
     L.startBtn = Xform(s, offX, offY, 107, 420, 120, 59);
     L.resetBtn = Xform(s, offX, offY, 239, 420, 120, 59);
 
-    L.dotsY = offY + (int)(S(523) * s);
-    L.dotR = (int)(S(6) * s);
-    L.dotGap = (int)(S(8) * s);
+    L.dotsY = offY + (int)(523 * s);
+    L.dotR = (int)(6 * s);
+    L.dotGap = (int)(8 * s);
     return L;
 }
 
@@ -193,7 +193,7 @@ static void RebuildFonts(double scale) {
     if (g_fButton) DeleteObject(g_fButton);
     if (g_fSessions) DeleteObject(g_fSessions);
     if (g_fIcon) DeleteObject(g_fIcon);
-    auto px = [&](int base96) { return -(int)(S(base96) * scale); };
+    auto px = [&](int base) { return -(int)(base * scale + 0.5); };
     g_fTime     = CreateFontW(px(46), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_fMode     = CreateFontW(px(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
     g_fTab      = CreateFontW(px(13), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
@@ -245,10 +245,10 @@ static void Paint(HWND h) {
     int s = g_timer.secsLeft(now);
     wchar_t buf[16];
     wsprintfW(buf, L"%02d:%02d", s / 60, s % 60);
-    int timeBoxH = (int)(S(56) * L.scale);
-    RECT timeBox = { L.ringCx - L.ringR, L.ringCy - timeBoxH - (int)(S(2) * L.scale), L.ringCx + L.ringR, L.ringCy - (int)(S(2) * L.scale) };
+    int timeBoxH = (int)(56 * L.scale);
+    RECT timeBox = { L.ringCx - L.ringR, L.ringCy - timeBoxH - (int)(2 * L.scale), L.ringCx + L.ringR, L.ringCy - (int)(2 * L.scale) };
     DrawCentered(dc, buf, timeBox, g_fTime, kWhite);
-    RECT modeBox = { L.ringCx - L.ringR, L.ringCy + (int)(S(6) * L.scale), L.ringCx + L.ringR, L.ringCy + (int)(S(6) * L.scale) + (int)(S(22) * L.scale) };
+    RECT modeBox = { L.ringCx - L.ringR, L.ringCy + (int)(6 * L.scale), L.ringCx + L.ringR, L.ringCy + (int)(6 * L.scale) + (int)(22 * L.scale) };
     DrawCentered(dc, ModeLabel(cur), modeBox, g_fMode, kSecondary);
 
     FillRoundedRect(dc, L.startBtn, kWhite);
@@ -262,7 +262,7 @@ static void Paint(HWND h) {
     int sessions = g_timer.completedSessions();
     wsprintfW(sessionsText, L"%d session%s", sessions, sessions == 1 ? L"" : L"s");
     int sessionsW = TextWidthPx(dc, g_fSessions, sessionsText);
-    int gapPx = (int)(S(12) * L.scale);
+    int gapPx = (int)(12 * L.scale);
     int clusterW = dotsTotalW + gapPx + sessionsW;
     int clusterX = (cw - clusterW) / 2;
 
@@ -278,7 +278,7 @@ static void Paint(HWND h) {
     }
     DeleteObject(dotLit);
     DeleteObject(dotDim);
-    RECT sessionsBox = { clusterX + dotsTotalW + gapPx, L.dotsY - (int)(S(10) * L.scale), clusterX + clusterW, L.dotsY + (int)(S(10) * L.scale) };
+    RECT sessionsBox = { clusterX + dotsTotalW + gapPx, L.dotsY - (int)(10 * L.scale), clusterX + clusterW, L.dotsY + (int)(10 * L.scale) };
     DrawCentered(dc, sessionsText, sessionsBox, g_fSessions, kSecondary);
 
     BitBlt(wdc, 0, 0, cw, ch, dc, 0, 0, SRCCOPY);
@@ -289,7 +289,7 @@ static void Paint(HWND h) {
 }
 
 static void ApplyRoundedRegion(HWND h, int cw, int ch, double scale) {
-    int radius = (int)(S(24) * scale);
+    int radius = (int)(24 * scale);
     int maxRadius = (cw < ch ? cw : ch) / 2;
     if (radius > maxRadius) radius = maxRadius;
     SetWindowRgn(h, CreateRoundRectRgn(0, 0, cw + 1, ch + 1, radius, radius), TRUE);
@@ -350,6 +350,21 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         ReleaseDC(h, dc);
         return HitButton(L, cp) != HIT_NONE ? HTCLIENT : HTCAPTION;
     }
+    case WM_NCLBUTTONDBLCLK:
+        return 0;  // double-clicking the draggable area must not maximize the fixed-aspect widget
+    case WM_SYSCOMMAND:
+        if ((w & 0xFFF0) == SC_MAXIMIZE) return 0;
+        break;
+    case WM_DPICHANGED: {
+        // Moved to a monitor with a different DPI: adopt the suggested size so the widget
+        // keeps the same physical size instead of being bitmap-stretched or mis-sized.
+        g_dpi = HIWORD(w);
+        const RECT* r = (const RECT*)l;
+        SetWindowPos(h, nullptr, r->left, r->top, r->right - r->left, r->bottom - r->top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        g_curW = g_curH = 0;  // force font rebuild on next paint
+        return 0;
+    }
     case WM_SIZE:
         InvalidateRect(h, nullptr, FALSE);
         return 0;
@@ -407,7 +422,12 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     g_hinst = hi;
-    SetProcessDPIAware();
+    // Per-monitor-v2 DPI awareness where available (Win10 1703+), else system-aware.
+    // Looked up dynamically so the build also works with older SDK headers.
+    typedef BOOL (WINAPI *SetDpiCtxFn)(HANDLE);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    SetDpiCtxFn setCtx = (SetDpiCtxFn)(void*)GetProcAddress(user32, "SetProcessDpiAwarenessContext");
+    if (!setCtx || !setCtx((HANDLE)-4 /* PER_MONITOR_AWARE_V2 */)) SetProcessDPIAware();
     HDC sdc = GetDC(nullptr);
     g_dpi = GetDeviceCaps(sdc, LOGPIXELSX);
     ReleaseDC(nullptr, sdc);
@@ -423,8 +443,19 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
 
     // WS_EX_APPWINDOW (and no WS_EX_TOOLWINDOW) ensures a taskbar button even though this
     // is a WS_POPUP window, so it can be found/minimized/restored like a normal app.
+    // Initial size: the base design at the current DPI, shrunk (aspect preserved) to fit the
+    // work area so it is never taller/wider than the screen, then centered-ish near the top-left.
+    RECT wa; SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
+    int winW = S(BASE_W), winH = S(BASE_H);
+    double fit = 1.0;
+    double maxW = (wa.right - wa.left) * 0.9, maxH = (wa.bottom - wa.top) * 0.9;
+    if (winW > maxW) fit = maxW / winW;
+    if (winH * fit > maxH) fit = maxH / winH;
+    winW = (int)(winW * fit); winH = (int)(winH * fit);
+    int winX = wa.left + (wa.right - wa.left - winW) / 4;
+    int winY = wa.top + (wa.bottom - wa.top - winH) / 4;
     g_main = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, wc.lpszClassName, L"Pomodoro Desk",
-                              WS_POPUP | WS_THICKFRAME, S(80), S(60), S(BASE_W), S(BASE_H),
+                              WS_POPUP | WS_THICKFRAME, winX, winY, winW, winH,
                               nullptr, nullptr, hi, nullptr);
     SetTimer(g_main, 1, 200, nullptr);
     ShowWindow(g_main, SW_SHOWNORMAL);
