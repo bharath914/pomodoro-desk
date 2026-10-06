@@ -15,6 +15,8 @@ RequestExecutionLevel user
 InstallDir "$LOCALAPPDATA\PomodoroDesk"
 Name "${APP_NAME}"
 OutFile "..\dist\PomodoroDeskSetup.exe"
+Icon "pomodoro.ico"
+UninstallIcon "pomodoro.ico"
 
 Page directory
 Page instfiles

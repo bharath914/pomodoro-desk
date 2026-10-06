@@ -1,8 +1,8 @@
 // Minimal always-on-top Pomodoro overlay for Windows (Win32 + GDI, no dependencies).
 // All countdown/cycle logic lives in ../core/TimerEngine — this file is UI/rendering only.
 //
-// Build (MinGW):  g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32
-// Build (MSVC):   cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp user32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS
+// Build (MinGW):  windres windows/pomodoro.rc -O coff -o pomodoro_res.o && g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp pomodoro_res.o -o pomodoro.exe -lgdi32 -luser32
+// Build (MSVC):   rc windows\pomodoro.rc && cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp windows\pomodoro.res user32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS
 //
 // Shows up in the taskbar (can be minimized back from there). Drag anywhere to move,
 // drag an edge/corner to resize (aspect ratio locked, so it always scales as a whole).
@@ -434,12 +434,16 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
 
     RebuildFonts(1.0);
 
-    WNDCLASSW wc = {};
+    WNDCLASSEXW wc = {};
+    wc.cbSize = sizeof(wc);
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hi;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.lpszClassName = L"PomoOverlay";
-    RegisterClassW(&wc);
+    // Icon resource id 1 (windows/pomodoro.rc): large for taskbar/Alt-Tab, small for the window corner.
+    wc.hIcon = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR);
+    wc.hIconSm = (HICON)LoadImageW(hi, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    RegisterClassExW(&wc);
 
     // WS_EX_APPWINDOW (and no WS_EX_TOOLWINDOW) ensures a taskbar button even though this
     // is a WS_POPUP window, so it can be found/minimized/restored like a normal app.

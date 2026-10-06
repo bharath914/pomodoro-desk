@@ -4,7 +4,8 @@ A tiny always-on-top Pomodoro timer, built natively for Windows, Linux, and macO
 
 ```
 core/     TimerEngine — pure C++ Pomodoro-cycle logic, shared by windows/ and linux/, plus its test suite
-windows/  Win32 + GDI UI (pomodoro.cpp) + NSIS installer script
+windows/  Win32 + GDI UI (pomodoro.cpp), app icon (pomodoro.ico/.rc) + NSIS installer script
+assets/   icon.png (1024px master) and make_icon.ps1, which regenerates it and the .ico
 linux/    X11 + Xft UI (pomodoro.cpp)
 swift/    SwiftPM package: PomodoroCore (Swift port of the same logic, with its own test suite)
           + PomodoroDesk (AppKit/SwiftUI UI)
@@ -32,7 +33,8 @@ A portable `pomodoro.exe` (just unzip and run, no installer) is also attached to
 
 **Windows (MinGW, also used to cross-compile from Linux):**
 ```
-g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32
+windres windows/pomodoro.rc -O coff -o pomodoro_res.o
+g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp pomodoro_res.o -o pomodoro.exe -lgdi32 -luser32
 ```
 
 **Windows installer (NSIS):**

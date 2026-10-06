@@ -1,0 +1,2 @@
+// Embeds the app icon (taskbar, Alt-Tab, Explorer, shortcuts). Regenerate the .ico via assets/make_icon.ps1.
+1 ICON "pomodoro.ico"
