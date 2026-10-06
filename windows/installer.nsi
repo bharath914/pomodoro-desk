@@ -8,7 +8,7 @@
 !define APP_NAME "Pomodoro Desk"
 !define APP_EXE "pomodoro.exe"
 !define APP_PUBLISHER "Bharath"
-!define APP_VERSION "2.0.0"
+!define APP_VERSION "2.1.0"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\PomodoroDesk"
 
 RequestExecutionLevel user
