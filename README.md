@@ -46,8 +46,8 @@ makensis windows/installer.nsi            # produces dist/PomodoroDeskSetup.exe
 
 **Windows (MSVC):**
 ```
-rc windowspomodoro.rc
-cl /O2 /EHsc windowspomodoro.cpp coreTimerEngine.cpp windowspomodoro.res user32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS
+rc windows\pomodoro.rc
+cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp windows\pomodoro.res user32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS
 ```
 
 **Linux (X11):**
