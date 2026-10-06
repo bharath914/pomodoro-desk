@@ -70,6 +70,21 @@ static void test_add_minutes_while_paused() {
     CHECK(!t.isRunning());
 }
 
+static void test_subtract_minutes_while_paused_clamps_at_zero() {
+    TimerEngine t(5);
+    t.addMinutes(-10);
+    CHECK(t.secsLeft(0) == 0);
+    CHECK(t.state() == TimerState::Done);
+}
+
+static void test_subtract_minutes_while_running() {
+    TimerEngine t(25);
+    t.start(0);
+    t.addMinutes(-10);
+    CHECK(t.secsLeft(0) == 15 * 60);
+    CHECK(t.isRunning());
+}
+
 static void test_reset_reverts_to_full_duration() {
     TimerEngine t(25);
     t.start(0);
@@ -138,6 +153,8 @@ int main() {
     test_toggle_round_trip();
     test_add_minutes_while_running();
     test_add_minutes_while_paused();
+    test_subtract_minutes_while_paused_clamps_at_zero();
+    test_subtract_minutes_while_running();
     test_reset_reverts_to_full_duration();
     test_set_duration_resets();
     test_update_completes_exactly_once();

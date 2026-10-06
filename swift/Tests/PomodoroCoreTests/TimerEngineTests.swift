@@ -61,6 +61,21 @@ final class TimerEngineTests: XCTestCase {
         XCTAssertFalse(t.isRunning)
     }
 
+    func testSubtractMinutesWhilePausedClampsAtZero() {
+        let t = TimerEngine(durationMinutes: 5)
+        t.addMinutes(-10)
+        XCTAssertEqual(t.secsLeft(now: 0), 0)
+        XCTAssertEqual(t.state, .done)
+    }
+
+    func testSubtractMinutesWhileRunning() {
+        let t = TimerEngine(durationMinutes: 25)
+        t.start(now: 0)
+        t.addMinutes(-10)
+        XCTAssertEqual(t.secsLeft(now: 0), 15 * 60)
+        XCTAssertTrue(t.isRunning)
+    }
+
     func testResetRevertsToFullDuration() {
         let t = TimerEngine(durationMinutes: 25)
         t.start(now: 0)

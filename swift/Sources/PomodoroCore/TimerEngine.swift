@@ -47,8 +47,14 @@ public final class TimerEngine {
 
     public func addMinutes(_ minutes: Int) {
         let add = Int64(minutes) * 60_000
-        if isRunning { endTime += add } else { remainMs += add }
+        if isRunning {
+            endTime += add
+        } else {
+            remainMs = min(max(remainMs + add, 0), Self.maxMs)
+        }
     }
+
+    private static let maxMs: Int64 = 24 * 60 * 60 * 1000  // sanity cap: 24 hours
 
     /// Call periodically while running; returns true exactly once, the moment the countdown hits zero.
     @discardableResult

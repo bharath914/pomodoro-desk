@@ -3,7 +3,9 @@
 //
 // Build: g++ -O2 -s linux/pomodoro.cpp core/TimerEngine.cpp -o pomodoro $(pkg-config --cflags --libs x11 xext xft)
 //
-// Drag anywhere to move. Hover to reveal controls. Space = start/pause. Right-click = menu (duration/custom/quit).
+// DigitalNumbers-Regular.ttf must sit next to the binary (loaded in-process, not installed system-wide).
+//
+// Drag anywhere to move, drag an edge/corner to resize. Space = start/pause. Right-click = menu (duration/custom/quit).
 
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -11,27 +13,60 @@
 #include <X11/keysym.h>
 #include <X11/extensions/shape.h>
 #include <X11/Xft/Xft.h>
+#include <fontconfig/fontconfig.h>
 #include <sys/select.h>
+#include <unistd.h>
 #include <time.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
 #include "../core/TimerEngine.h"
 
-// ---------- layout ----------
-static const int W = 216, H = 130;
-static const int BTN_W = 36, BTN_H = 26, BTN_GAP = 4, BTN_Y = 96;
-enum { B_PLAYPAUSE, B_PLUS5, B_PLUS10, B_RESET, B_CLOSE, B_COUNT };
+// ---------- base design layout, in logical units (scaled uniformly to fit the window) ----------
+static const int BASE_W = 320, BASE_H = 198;
+static const int MIN_W = 220, MIN_H = 150;
+static const int EDGE = 8;  // px margin around the window edge that grabs for resize
 
 struct Rect { int x, y, w, h; };
+static bool PtIn(const Rect& r, int x, int y) { return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h; }
 
-static Rect BtnRect(int i) {
-    int total = B_COUNT * BTN_W + (B_COUNT - 1) * BTN_GAP;
-    int x = (W - total) / 2 + i * (BTN_W + BTN_GAP);
-    return { x, BTN_Y, BTN_W, BTN_H };
+struct Layout {
+    double scale;
+    Rect time, startBtn, stepper, stepMinus, stepPlus, pauseBtn, resetBtn;
+};
+
+static Rect Xform(double s, int ox, int oy, int bx, int by, int bw, int bh) {
+    return { ox + (int)(bx * s), oy + (int)(by * s), (int)(bw * s), (int)(bh * s) };
 }
-static bool PtIn(const Rect& r, int x, int y) {
-    return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+
+static Layout ComputeLayout(int cw, int ch) {
+    double sx = (double)cw / BASE_W, sy = (double)ch / BASE_H;
+    double s = sx < sy ? sx : sy;
+    int offX = (int)((cw - BASE_W * s) / 2);
+    int offY = (int)((ch - BASE_H * s) / 2);
+
+    Layout L;
+    L.scale = s;
+    L.time     = Xform(s, offX, offY, 0, 14, BASE_W, 86);
+    L.startBtn = Xform(s, offX, offY, 75, 112, 170, 40);
+    L.stepper  = Xform(s, offX, offY, 27, 164, 150, 34);
+    L.pauseBtn = Xform(s, offX, offY, 185, 164, 50, 34);
+    L.resetBtn = Xform(s, offX, offY, 243, 164, 50, 34);
+    int quarter = L.stepper.w / 4;
+    L.stepMinus = { L.stepper.x, L.stepper.y, quarter, L.stepper.h };
+    L.stepPlus  = { L.stepper.x + L.stepper.w - quarter, L.stepper.y, quarter, L.stepper.h };
+    return L;
+}
+
+enum { HIT_NONE = -1, HIT_START, HIT_STEP_MINUS, HIT_STEP_PLUS, HIT_PAUSE, HIT_RESET };
+
+static int HitButton(const Layout& L, int x, int y) {
+    if (PtIn(L.startBtn, x, y)) return HIT_START;
+    if (PtIn(L.stepMinus, x, y)) return HIT_STEP_MINUS;
+    if (PtIn(L.stepPlus, x, y)) return HIT_STEP_PLUS;
+    if (PtIn(L.pauseBtn, x, y)) return HIT_PAUSE;
+    if (PtIn(L.resetBtn, x, y)) return HIT_RESET;
+    return HIT_NONE;
 }
 
 // ---------- X state ----------
@@ -42,12 +77,11 @@ static Pixmap backbuffer;
 static XftDraw* xftDraw;
 static Visual* visual;
 static Colormap colormap;
-static XftFont *fTime, *fLabel, *fBtnIcon, *fBtnText, *fPopup;
-static int winX = 40, winY = 40;
+static XftFont *fTime, *fStart, *fStep, *fIcon, *fPopup;
+static int winX = 60, winY = 60, curW = BASE_W, curH = BASE_H;
 static bool appRunning = true;
 
 static TimerEngine g_timer(25);
-static bool g_hover = false;
 static int g_shownSecs = -1;
 
 static int64_t Now() {
@@ -62,27 +96,60 @@ static int ClampMinutesInput(const std::string& s) {
     return ClampMinutes(v);
 }
 
-// ---------- colors (flat, Apple-dark inspired) ----------
-static XftColor cBg, cBtnRow, cBtn, cFg, cBlue, cGray, cRed, cOrange;
+// ---------- colors ----------
+static XftColor cBg, cFg, cBlack;
 
 static void MakeColor(XftColor* out, int r, int g, int b) {
     XRenderColor rc = { (unsigned short)(r * 257), (unsigned short)(g * 257), (unsigned short)(b * 257), 0xffff };
     XftColorAllocValue(dpy, visual, colormap, &rc, out);
 }
 
-static void FillRect(Pixmap target, XftColor* c, int x, int y, int w, int h) {
+static void FillRect(Drawable target, XftColor* c, int x, int y, int w, int h) {
     GC gc = XCreateGC(dpy, target, 0, nullptr);
     XSetForeground(dpy, gc, c->pixel);
     XFillRectangle(dpy, target, gc, x, y, w, h);
     XFreeGC(dpy, gc);
 }
 
-static void DrawCentered(XftFont* font, XftColor* c, int top, int height, const char* text) {
-    XGlyphInfo extents;
-    XftTextExtentsUtf8(dpy, font, (const FcChar8*)text, strlen(text), &extents);
-    int x = (W - (int)extents.xOff) / 2;
-    int y = top + (height - (font->ascent + font->descent)) / 2 + font->ascent;
-    XftDrawStringUtf8(xftDraw, c, font, x, y, (const FcChar8*)text, strlen(text));
+// Pill: fully rounded ends. Rounded-square: modest corner radius. Outline-only when fill==border==outline color scheme handled by caller.
+static void FillRoundedRect(Drawable target, XftColor* fill, int x, int y, int w, int h, int radius) {
+    GC gc = XCreateGC(dpy, target, 0, nullptr);
+    XSetForeground(dpy, gc, fill->pixel);
+    if (radius > h / 2) radius = h / 2;
+    if (radius > w / 2) radius = w / 2;
+    XFillRectangle(dpy, target, gc, x + radius, y, w - 2 * radius, h);
+    XFillRectangle(dpy, target, gc, x, y + radius, w, h - 2 * radius);
+    XFillArc(dpy, target, gc, x, y, radius * 2, radius * 2, 90 * 64, 90 * 64);
+    XFillArc(dpy, target, gc, x + w - radius * 2, y, radius * 2, radius * 2, 0 * 64, 90 * 64);
+    XFillArc(dpy, target, gc, x, y + h - radius * 2, radius * 2, radius * 2, 180 * 64, 90 * 64);
+    XFillArc(dpy, target, gc, x + w - radius * 2, y + h - radius * 2, radius * 2, radius * 2, 270 * 64, 90 * 64);
+    XFreeGC(dpy, gc);
+}
+
+static void StrokeRoundedRect(Drawable target, XftColor* border, int x, int y, int w, int h, int radius) {
+    GC gc = XCreateGC(dpy, target, 0, nullptr);
+    XSetForeground(dpy, gc, border->pixel);
+    if (radius > h / 2) radius = h / 2;
+    if (radius > w / 2) radius = w / 2;
+    XDrawLine(dpy, target, gc, x + radius, y, x + w - radius, y);
+    XDrawLine(dpy, target, gc, x + radius, y + h - 1, x + w - radius, y + h - 1);
+    XDrawLine(dpy, target, gc, x, y + radius, x, y + h - radius);
+    XDrawLine(dpy, target, gc, x + w - 1, y + radius, x + w - 1, y + h - radius);
+    XDrawArc(dpy, target, gc, x, y, radius * 2, radius * 2, 90 * 64, 90 * 64);
+    XDrawArc(dpy, target, gc, x + w - radius * 2 - 1, y, radius * 2, radius * 2, 0 * 64, 90 * 64);
+    XDrawArc(dpy, target, gc, x, y + h - radius * 2 - 1, radius * 2, radius * 2, 180 * 64, 90 * 64);
+    XDrawArc(dpy, target, gc, x + w - radius * 2 - 1, y + h - radius * 2 - 1, radius * 2, radius * 2, 270 * 64, 90 * 64);
+    XFreeGC(dpy, gc);
+}
+
+static void DrawCentered(Drawable target, XftFont* font, XftColor* c, const Rect& r, const char* text) {
+    XGlyphInfo ext;
+    XftTextExtentsUtf8(dpy, font, (const FcChar8*)text, strlen(text), &ext);
+    XftDraw* d = XftDrawCreate(dpy, target, visual, colormap);
+    int tx = r.x + (r.w - (int)ext.xOff) / 2;
+    int ty = r.y + (r.h - (font->ascent + font->descent)) / 2 + font->ascent;
+    XftDrawStringUtf8(d, c, font, tx, ty, (const FcChar8*)text, strlen(text));
+    XftDrawDestroy(d);
 }
 
 // ---------- timer actions ----------
@@ -93,63 +160,53 @@ static void UiReset() { g_timer.reset(); RedrawMain(); }
 static void UiAddMinutes(int m) { g_timer.addMinutes(m); RedrawMain(); }
 static void UiSetDuration(int minutes) { g_timer.setDuration(minutes); RedrawMain(); }
 
-static const char* StateLabel() {
+static const char* StartLabel() {
     switch (g_timer.state()) {
-    case TimerState::Running: return "R U N N I N G";
-    case TimerState::Done:    return "D O N E";
-    case TimerState::Paused:  return "P A U S E D";
-    default:                  return "R E A D Y";
+    case TimerState::Running: return "Pause";
+    case TimerState::Paused:  return "Resume";
+    default:                  return "Start";
     }
 }
 
-static XftColor* StateColor() {
-    switch (g_timer.state()) {
-    case TimerState::Running: return &cBlue;
-    case TimerState::Done:    return &cRed;
-    default:                  return &cGray;
-    }
+static std::string FontPathNextToExe(const char* filename) {
+    char exePath[4096];
+    ssize_t n = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+    if (n <= 0) return filename;
+    exePath[n] = 0;
+    char* slash = strrchr(exePath, '/');
+    if (slash) *(slash + 1) = 0;
+    return std::string(exePath) + filename;
 }
 
-static void RedrawMain() {
-    FillRect(backbuffer, &cBg, 0, 0, W, H);
-    DrawCentered(fLabel, StateColor(), 8, 20, StateLabel());
-
-    int64_t now = Now();
-    int s = g_timer.secsLeft(now);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%02d:%02d", s / 60, s % 60);
-    XftColor* timeColor = &cFg;
-    if (g_timer.state() == TimerState::Done) timeColor = &cRed;
-    else if (g_timer.isRunning() && s <= 60) timeColor = &cOrange;
-    DrawCentered(fTime, timeColor, 26, 58, buf);
-
-    if (g_hover) {
-        FillRect(backbuffer, &cBtnRow, 0, BTN_Y - 6, W, H - (BTN_Y - 6));
-        const char* glyph[B_COUNT] = { g_timer.isRunning() ? "||" : ">", "+5", "+10", "R", "X" };
-        XftFont* fonts[B_COUNT] = { fBtnIcon, fBtnText, fBtnText, fBtnIcon, fBtnIcon };
-        for (int i = 0; i < B_COUNT; i++) {
-            Rect r = BtnRect(i);
-            FillRect(backbuffer, &cBtn, r.x, r.y, r.w, r.h);
-            XGlyphInfo ext;
-            XftTextExtentsUtf8(dpy, fonts[i], (const FcChar8*)glyph[i], strlen(glyph[i]), &ext);
-            int tx = r.x + (r.w - (int)ext.xOff) / 2;
-            int ty = r.y + (r.h - (fonts[i]->ascent + fonts[i]->descent)) / 2 + fonts[i]->ascent;
-            XftDrawStringUtf8(xftDraw, &cFg, fonts[i], tx, ty, (const FcChar8*)glyph[i], strlen(glyph[i]));
-        }
-    }
-
-    XCopyArea(dpy, backbuffer, win, DefaultGC(dpy, screen), 0, 0, W, H, 0, 0);
-    XFlush(dpy);
+static void RebuildFonts(double scale) {
+    if (fTime) XftFontClose(dpy, fTime);
+    if (fStart) XftFontClose(dpy, fStart);
+    if (fStep) XftFontClose(dpy, fStep);
+    if (fIcon) XftFontClose(dpy, fIcon);
+    char pat[64];
+    snprintf(pat, sizeof(pat), "Digital Numbers:size=%d", (int)(68 * scale));
+    fTime = XftFontOpenName(dpy, screen, pat);
+    snprintf(pat, sizeof(pat), "Sans:bold:size=%d", (int)(17 * scale));
+    fStart = XftFontOpenName(dpy, screen, pat);
+    snprintf(pat, sizeof(pat), "Sans:bold:size=%d", (int)(15 * scale));
+    fStep = XftFontOpenName(dpy, screen, pat);
+    snprintf(pat, sizeof(pat), "Sans:size=%d", (int)(16 * scale));
+    fIcon = XftFontOpenName(dpy, screen, pat);
 }
 
-static int HitButton(int x, int y) {
-    if (!g_hover) return -1;
-    for (int i = 0; i < B_COUNT; i++) if (PtIn(BtnRect(i), x, y)) return i;
-    return -1;
+static void RecreateBackbuffer() {
+    if (xftDraw) XftDrawDestroy(xftDraw);
+    if (backbuffer) XFreePixmap(dpy, backbuffer);
+    backbuffer = XCreatePixmap(dpy, win, curW, curH, DefaultDepth(dpy, screen));
+    xftDraw = XftDrawCreate(dpy, backbuffer, visual, colormap);
 }
 
-static void ApplyRoundedShape(Window target, int w, int h, int radius) {
-    Pixmap mask = XCreatePixmap(dpy, target, w, h, 1);
+static void ApplyRoundedShape(int w, int h) {
+    int radius = (int)(22 * ComputeLayout(w, h).scale);
+    int maxR = (w < h ? w : h) / 2;
+    if (radius > maxR) radius = maxR;
+    if (radius < 1) radius = 1;
+    Pixmap mask = XCreatePixmap(dpy, win, w, h, 1);
     GC mgc = XCreateGC(dpy, mask, 0, nullptr);
     XSetForeground(dpy, mgc, 0);
     XFillRectangle(dpy, mask, mgc, 0, 0, w, h);
@@ -160,7 +217,7 @@ static void ApplyRoundedShape(Window target, int w, int h, int radius) {
     XFillArc(dpy, mask, mgc, w - radius * 2, 0, radius * 2, radius * 2, 0, 360 * 64);
     XFillArc(dpy, mask, mgc, 0, h - radius * 2, radius * 2, radius * 2, 0, 360 * 64);
     XFillArc(dpy, mask, mgc, w - radius * 2, h - radius * 2, radius * 2, radius * 2, 0, 360 * 64);
-    XShapeCombineMask(dpy, target, ShapeBounding, 0, 0, mask, ShapeSet);
+    XShapeCombineMask(dpy, win, ShapeBounding, 0, 0, mask, ShapeSet);
     XFreeGC(dpy, mgc);
     XFreePixmap(dpy, mask);
 }
@@ -176,9 +233,8 @@ static Window MakeOverrideRedirectWindow(int x, int y, int w, int h) {
     attrs.override_redirect = True;
     attrs.background_pixel = cBg.pixel;
     attrs.event_mask = ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | KeyPressMask;
-    Window ww = XCreateWindow(dpy, root, x, y, w, h, 0, DefaultDepth(dpy, screen), InputOutput,
-                               visual, CWOverrideRedirect | CWBackPixel | CWEventMask, &attrs);
-    return ww;
+    return XCreateWindow(dpy, root, x, y, w, h, 0, DefaultDepth(dpy, screen), InputOutput,
+                          visual, CWOverrideRedirect | CWBackPixel | CWEventMask, &attrs);
 }
 
 // ---------- context menu ----------
@@ -208,16 +264,11 @@ static int RunContextMenu(int rootX, int rootY) {
     XGrabKeyboard(dpy, menu, True, GrabModeAsync, GrabModeAsync, CurrentTime);
 
     auto draw = [&](int hoverIdx) {
-        FillRect(menu, &cBtnRow, 0, 0, menuW, menuH);
+        FillRect(menu, &cBg, 0, 0, menuW, menuH);
         for (int i = 0; i < n; i++) {
             int iy = 4 + i * itemH;
-            if (i == hoverIdx) FillRect(menu, &cBtn, 2, iy, menuW - 4, itemH);
-            XGlyphInfo ext;
-            XftTextExtentsUtf8(dpy, fPopup, (const FcChar8*)items[i].text, strlen(items[i].text), &ext);
-            int ty = iy + (itemH - (fPopup->ascent + fPopup->descent)) / 2 + fPopup->ascent;
-            XftDraw* d = XftDrawCreate(dpy, menu, visual, colormap);
-            XftDrawStringUtf8(d, &cFg, fPopup, 10, ty, (const FcChar8*)items[i].text, strlen(items[i].text));
-            XftDrawDestroy(d);
+            if (i == hoverIdx) FillRect(menu, &cBlack, 2, iy, menuW - 4, itemH);
+            DrawCentered(menu, fPopup, &cFg, { 0, iy, menuW, itemH }, items[i].text);
         }
         XFlush(dpy);
     };
@@ -237,7 +288,7 @@ static int RunContextMenu(int rootX, int rootY) {
         } else if (ev.type == ButtonRelease) {
             int idx = (ev.xbutton.y - 4) / itemH;
             bool inside = ev.xbutton.x >= 0 && ev.xbutton.x < menuW && idx >= 0 && idx < n;
-            result = inside ? items[idx].id : 0;  // 0 = dismissed
+            result = inside ? items[idx].id : 0;
         } else if (ev.type == KeyPress) {
             KeySym ks = XLookupKeysym(&ev.xkey, 0);
             if (ks == XK_Escape) result = 0;
@@ -258,7 +309,7 @@ static void ShowContextMenu(int rootX, int rootY) {
     case ID_DUR_45:  UiSetDuration(45); break;
     case ID_DUR_60:  UiSetDuration(60); break;
     case ID_DUR_120: UiSetDuration(120); break;
-    case ID_CUSTOM:  ShowCustomPopup(winX, winY + H + 4); break;
+    case ID_CUSTOM:  ShowCustomPopup(winX, winY + curH + 4); break;
     case ID_QUIT:    appRunning = false; break;
     }
 }
@@ -277,11 +328,9 @@ static void ShowCustomPopup(int nearX, int nearY) {
 
     auto draw = [&]() {
         FillRect(popup, &cBg, 0, 0, w, h);
-        XftDraw* d = XftDrawCreate(dpy, popup, visual, colormap);
-        XftDrawStringUtf8(d, &cGray, fPopup, 10, 22, (const FcChar8*)"Minutes (1-999):", 16);
+        DrawCentered(popup, fPopup, &cFg, { 10, 8, 160, 18 }, "Minutes (1-999):");
         std::string shown = buf + "|";
-        XftDrawStringUtf8(d, &cFg, fPopup, 10, 50, (const FcChar8*)shown.c_str(), (int)shown.size());
-        XftDrawDestroy(d);
+        DrawCentered(popup, fPopup, &cFg, { 10, 36, 160, 24 }, shown.c_str());
         XFlush(dpy);
     };
 
@@ -310,7 +359,7 @@ static void ShowCustomPopup(int nearX, int nearY) {
             }
         } else if (ev.type == ButtonPress) {
             bool inside = ev.xbutton.x >= 0 && ev.xbutton.x < w && ev.xbutton.y >= 0 && ev.xbutton.y < h;
-            if (!inside) done = true;  // click outside cancels, like losing focus
+            if (!inside) done = true;
         }
     }
 
@@ -319,51 +368,124 @@ static void ShowCustomPopup(int nearX, int nearY) {
     XDestroyWindow(dpy, popup);
 }
 
+// ---------- rendering ----------
+static void RedrawMain() {
+    Layout L = ComputeLayout(curW, curH);
+    FillRect(backbuffer, &cBg, 0, 0, curW, curH);
+
+    int s = g_timer.secsLeft(Now());
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d", s / 60, s % 60);
+    DrawCentered(backbuffer, fTime, &cFg, L.time, buf);
+
+    FillRoundedRect(backbuffer, &cFg, L.startBtn.x, L.startBtn.y, L.startBtn.w, L.startBtn.h, L.startBtn.h / 2);
+    DrawCentered(backbuffer, fStart, &cBlack, L.startBtn, StartLabel());
+
+    FillRoundedRect(backbuffer, &cBg, L.stepper.x, L.stepper.y, L.stepper.w, L.stepper.h, L.stepper.h / 2);
+    StrokeRoundedRect(backbuffer, &cFg, L.stepper.x, L.stepper.y, L.stepper.w, L.stepper.h, L.stepper.h / 2);
+    Rect mid = { L.stepMinus.x + L.stepMinus.w, L.stepper.y, L.stepper.w - 2 * L.stepMinus.w, L.stepper.h };
+    DrawCentered(backbuffer, fStep, &cFg, L.stepMinus, "-");
+    DrawCentered(backbuffer, fStep, &cFg, mid, "10m");
+    DrawCentered(backbuffer, fStep, &cFg, L.stepPlus, "+");
+
+    int sqR = (int)(L.pauseBtn.h * 0.4);
+    FillRoundedRect(backbuffer, &cBg, L.pauseBtn.x, L.pauseBtn.y, L.pauseBtn.w, L.pauseBtn.h, sqR);
+    StrokeRoundedRect(backbuffer, &cFg, L.pauseBtn.x, L.pauseBtn.y, L.pauseBtn.w, L.pauseBtn.h, sqR);
+    DrawCentered(backbuffer, fIcon, &cFg, L.pauseBtn, g_timer.isRunning() ? "||" : ">");
+
+    FillRoundedRect(backbuffer, &cBg, L.resetBtn.x, L.resetBtn.y, L.resetBtn.w, L.resetBtn.h, sqR);
+    StrokeRoundedRect(backbuffer, &cFg, L.resetBtn.x, L.resetBtn.y, L.resetBtn.w, L.resetBtn.h, sqR);
+    DrawCentered(backbuffer, fIcon, &cFg, L.resetBtn, "R");
+
+    XCopyArea(dpy, backbuffer, win, DefaultGC(dpy, screen), 0, 0, curW, curH, 0, 0);
+    XFlush(dpy);
+}
+
+static void OnResized(int w, int h) {
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    curW = w;
+    curH = h;
+    RecreateBackbuffer();
+    ApplyRoundedShape(w, h);
+    RebuildFonts(ComputeLayout(w, h).scale);
+    RedrawMain();
+}
+
 // ---------- main window event handling ----------
-static bool dragging = false;
-static int dragOffX = 0, dragOffY = 0;
+enum DragMode { DRAG_NONE, DRAG_MOVE, DRAG_RESIZE };
+static DragMode dragMode = DRAG_NONE;
+static int dragStartRootX, dragStartRootY, dragStartWinX, dragStartWinY, dragStartW, dragStartH;
+static bool resizeLeft, resizeRight, resizeTop, resizeBottom;
+
+static void BeginResize(int rootX, int rootY, int localX, int localY) {
+    dragMode = DRAG_RESIZE;
+    dragStartRootX = rootX; dragStartRootY = rootY;
+    dragStartWinX = winX; dragStartWinY = winY;
+    dragStartW = curW; dragStartH = curH;
+    resizeLeft = localX < EDGE;
+    resizeRight = localX >= curW - EDGE;
+    resizeTop = localY < EDGE;
+    resizeBottom = localY >= curH - EDGE;
+}
 
 static void HandleEvent(const XEvent& ev) {
     switch (ev.type) {
     case Expose:
         RedrawMain();
         break;
-    case EnterNotify:
-        g_hover = true;
-        RedrawMain();
-        break;
-    case LeaveNotify:
-        g_hover = false;
-        RedrawMain();
+    case ConfigureNotify:
+        winX = ev.xconfigure.x;
+        winY = ev.xconfigure.y;
+        if (ev.xconfigure.width != curW || ev.xconfigure.height != curH) {
+            OnResized(ev.xconfigure.width, ev.xconfigure.height);
+        }
         break;
     case ButtonPress: {
         const XButtonEvent& be = ev.xbutton;
         if (be.button == Button3) {
             ShowContextMenu(be.x_root, be.y_root);
         } else if (be.button == Button1) {
-            int hit = HitButton(be.x, be.y);
-            switch (hit) {
-            case B_PLAYPAUSE: UiToggle(); break;
-            case B_PLUS5:  UiAddMinutes(5); break;
-            case B_PLUS10: UiAddMinutes(10); break;
-            case B_RESET:  UiReset(); break;
-            case B_CLOSE:  appRunning = false; break;
-            default:
-                dragging = true;
-                dragOffX = be.x_root - winX;
-                dragOffY = be.y_root - winY;
+            bool onEdge = be.x < EDGE || be.x >= curW - EDGE || be.y < EDGE || be.y >= curH - EDGE;
+            int hit = HitButton(ComputeLayout(curW, curH), be.x, be.y);
+            if (onEdge) {
+                BeginResize(be.x_root, be.y_root, be.x, be.y);
+            } else if (hit != HIT_NONE) {
+                switch (hit) {
+                case HIT_START:      UiToggle(); break;
+                case HIT_STEP_MINUS: UiAddMinutes(-10); break;
+                case HIT_STEP_PLUS:  UiAddMinutes(10); break;
+                case HIT_PAUSE:      UiToggle(); break;
+                case HIT_RESET:      UiReset(); break;
+                }
+            } else {
+                dragMode = DRAG_MOVE;
+                dragStartRootX = be.x_root - winX;
+                dragStartRootY = be.y_root - winY;
             }
         }
         break;
     }
     case ButtonRelease:
-        dragging = false;
+        dragMode = DRAG_NONE;
         break;
     case MotionNotify:
-        if (dragging) {
-            winX = ev.xmotion.x_root - dragOffX;
-            winY = ev.xmotion.y_root - dragOffY;
+        if (dragMode == DRAG_MOVE) {
+            winX = ev.xmotion.x_root - dragStartRootX;
+            winY = ev.xmotion.y_root - dragStartRootY;
             XMoveWindow(dpy, win, winX, winY);
+        } else if (dragMode == DRAG_RESIZE) {
+            int dx = ev.xmotion.x_root - dragStartRootX;
+            int dy = ev.xmotion.y_root - dragStartRootY;
+            int newX = dragStartWinX, newY = dragStartWinY;
+            int newW = dragStartW, newH = dragStartH;
+            if (resizeRight) newW = dragStartW + dx;
+            if (resizeBottom) newH = dragStartH + dy;
+            if (resizeLeft) { newW = dragStartW - dx; newX = dragStartWinX + dx; }
+            if (resizeTop) { newH = dragStartH - dy; newY = dragStartWinY + dy; }
+            if (newW < MIN_W) { if (resizeLeft) newX -= (MIN_W - newW); newW = MIN_W; }
+            if (newH < MIN_H) { if (resizeTop) newY -= (MIN_H - newH); newH = MIN_H; }
+            XMoveResizeWindow(dpy, win, newX, newY, newW, newH);
         }
         break;
     case KeyPress: {
@@ -386,31 +508,23 @@ int main() {
     visual = DefaultVisual(dpy, screen);
     colormap = DefaultColormap(dpy, screen);
 
-    MakeColor(&cBg, 22, 22, 24);
-    MakeColor(&cBtnRow, 38, 38, 40);
-    MakeColor(&cBtn, 54, 54, 58);
-    MakeColor(&cFg, 245, 245, 247);
-    MakeColor(&cBlue, 10, 132, 255);
-    MakeColor(&cGray, 142, 142, 147);
-    MakeColor(&cRed, 255, 69, 58);
-    MakeColor(&cOrange, 255, 159, 10);
+    MakeColor(&cBg, 0, 0, 0);
+    MakeColor(&cFg, 255, 255, 255);
+    MakeColor(&cBlack, 0, 0, 0);
 
-    fTime    = XftFontOpenName(dpy, screen, "Sans:light:size=24");
-    fLabel   = XftFontOpenName(dpy, screen, "Sans:bold:size=9");
-    fBtnIcon = XftFontOpenName(dpy, screen, "Sans:bold:size=13");
-    fBtnText = XftFontOpenName(dpy, screen, "Sans:bold:size=10");
-    fPopup   = XftFontOpenName(dpy, screen, "Sans:size=11");
+    std::string fontPath = FontPathNextToExe("DigitalNumbers-Regular.ttf");
+    FcConfigAppFontAddFile(FcConfigGetCurrent(), (const FcChar8*)fontPath.c_str());
+    fPopup = XftFontOpenName(dpy, screen, "Sans:size=12");
+    RebuildFonts(1.0);
 
-    win = MakeOverrideRedirectWindow(winX, winY, W, H);
+    win = MakeOverrideRedirectWindow(winX, winY, curW, curH);
     XSelectInput(dpy, win, ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
-                               EnterWindowMask | LeaveWindowMask | KeyPressMask);
-    ApplyRoundedShape(win, W, H, 18);
+                               KeyPressMask | StructureNotifyMask);
     SetOpacity(win, 0.98);
     XMapRaised(dpy, win);
 
-    backbuffer = XCreatePixmap(dpy, win, W, H, DefaultDepth(dpy, screen));
-    xftDraw = XftDrawCreate(dpy, backbuffer, visual, colormap);
-
+    RecreateBackbuffer();
+    ApplyRoundedShape(curW, curH);
     RedrawMain();
 
     int xfd = XConnectionNumber(dpy);

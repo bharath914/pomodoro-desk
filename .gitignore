@@ -5,3 +5,4 @@
 linux/pomodoro
 .build/
 *.swiftpm
+dist/

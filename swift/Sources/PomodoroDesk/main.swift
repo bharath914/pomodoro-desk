@@ -1,26 +1,38 @@
 import AppKit
+import CoreText
 import SwiftUI
 
-// Minimal always-on-top overlay, mirroring the Windows/Linux builds: borderless,
-// draggable, floats above other windows. Visual design is a placeholder pending
-// the upcoming redesign — only the logic/behavior parity matters right now.
+// Minimal always-on-top overlay, mirroring the Windows/Linux builds: borderless-looking
+// but natively resizable, floats above other windows, draggable by its background.
+
+func registerBundledFont() {
+    guard let url = Bundle.module.url(forResource: "DigitalNumbers-Regular", withExtension: "ttf") else { return }
+    CTFontManagerRegisterFontsForURL(url as CFURL, .process, nil)
+}
+
+registerBundledFont()
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)  // no Dock icon, no app menu
+app.setActivationPolicy(.accessory)  // no Dock icon, no app menu — lightweight overlay
 
 let viewModel = TimerViewModel()
 
 let window = NSWindow(
-    contentRect: NSRect(x: 100, y: 100, width: 220, height: 150),
-    styleMask: [.borderless],
+    contentRect: NSRect(x: 100, y: 100, width: 320, height: 198),
+    styleMask: [.titled, .resizable, .fullSizeContentView],
     backing: .buffered,
     defer: false
 )
-window.isOpaque = false
-window.backgroundColor = .clear
+window.titlebarAppearsTransparent = true
+window.titleVisibility = .hidden
+window.standardWindowButton(.closeButton)?.isHidden = true
+window.standardWindowButton(.miniaturizeButton)?.isHidden = true
+window.standardWindowButton(.zoomButton)?.isHidden = true
+window.isOpaque = true
+window.backgroundColor = .black
 window.level = .floating
 window.isMovableByWindowBackground = true
-window.hasShadow = true
+window.minSize = NSSize(width: 220, height: 150)
 window.contentView = NSHostingView(rootView: ContentView(vm: viewModel))
 window.makeKeyAndOrderFront(nil)
 

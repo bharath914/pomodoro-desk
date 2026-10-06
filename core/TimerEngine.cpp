@@ -1,5 +1,9 @@
 #include "TimerEngine.h"
 
+namespace {
+constexpr int64_t kMaxMs = 24LL * 60 * 60 * 1000;  // sanity cap: 24 hours
+}
+
 TimerEngine::TimerEngine(int durationMinutes)
     : durationMs_(static_cast<int64_t>(durationMinutes) * 60000), remainMs_(durationMs_) {}
 
@@ -33,8 +37,13 @@ void TimerEngine::toggle(int64_t nowMs) {
 
 void TimerEngine::addMinutes(int minutes) {
     int64_t add = static_cast<int64_t>(minutes) * 60000;
-    if (running_) endTime_ += add;
-    else remainMs_ += add;
+    if (running_) {
+        endTime_ += add;
+    } else {
+        remainMs_ += add;
+        if (remainMs_ < 0) remainMs_ = 0;
+        if (remainMs_ > kMaxMs) remainMs_ = kMaxMs;
+    }
 }
 
 bool TimerEngine::update(int64_t nowMs) {

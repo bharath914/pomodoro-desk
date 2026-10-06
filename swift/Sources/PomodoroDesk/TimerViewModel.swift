@@ -9,7 +9,7 @@ final class TimerViewModel: ObservableObject {
     private var timer: Timer?
 
     @Published var displayText: String = "25:00"
-    @Published var stateLabel: String = "READY"
+    @Published var startLabel: String = "Start"
     @Published var isRunning: Bool = false
 
     init() {
@@ -35,10 +35,9 @@ final class TimerViewModel: ObservableObject {
         displayText = String(format: "%02d:%02d", s / 60, s % 60)
         isRunning = engine.isRunning
         switch engine.state {
-        case .running: stateLabel = "RUNNING"
-        case .paused:  stateLabel = "PAUSED"
-        case .done:    stateLabel = "DONE"
-        case .ready:   stateLabel = "READY"
+        case .running: startLabel = "Pause"
+        case .paused:  startLabel = "Resume"
+        case .done, .ready: startLabel = "Start"
         }
     }
 

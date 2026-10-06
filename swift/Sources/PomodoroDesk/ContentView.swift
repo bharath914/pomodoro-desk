@@ -1,42 +1,38 @@
 import SwiftUI
 import AppKit
 
-// Placeholder UI — functional only, pending the real design pass.
-// Logic lives entirely in TimerViewModel/PomodoroCore; this view just binds to it.
+// Base design size (logical points); the whole layout scales uniformly to fit
+// whatever size the window is resized to, mirroring the Windows/Linux layout math.
+private let baseW: CGFloat = 320
+private let baseH: CGFloat = 198
+
 struct ContentView: View {
     @ObservedObject var vm: TimerViewModel
     @State private var showCustom = false
     @State private var customText = ""
 
     var body: some View {
-        VStack(spacing: 8) {
-            Text(vm.stateLabel)
-                .font(.caption.bold())
-                .foregroundColor(.secondary)
+        GeometryReader { geo in
+            let scale = min(geo.size.width / baseW, geo.size.height / baseH)
 
-            Text(vm.displayText)
-                .font(.system(size: 34, weight: .light))
-                .foregroundColor(.primary)
-                .monospacedDigit()
+            ZStack {
+                Color.black
 
-            HStack(spacing: 6) {
-                Button(action: vm.toggle) {
-                    Image(systemName: vm.isRunning ? "pause.fill" : "play.fill")
+                timeText(scale: scale)
+                    .position(x: geo.size.width / 2, y: (14 + 43) * scale)
+
+                startButton(scale: scale)
+                    .position(x: geo.size.width / 2, y: (112 + 20) * scale)
+
+                HStack(spacing: 8 * scale) {
+                    stepper(scale: scale)
+                    iconButton(systemName: vm.isRunning ? "pause.fill" : "play.fill", scale: scale, action: vm.toggle)
+                    iconButton(systemName: "arrow.counterclockwise", scale: scale, action: vm.reset)
                 }
-                Button(action: { vm.addMinutes(5) }) { Text("+5") }
-                Button(action: { vm.addMinutes(10) }) { Text("+10") }
-                Button(action: vm.reset) {
-                    Image(systemName: "arrow.counterclockwise")
-                }
-                Button(action: { NSApp.terminate(nil) }) {
-                    Image(systemName: "xmark")
-                }
+                .position(x: geo.size.width / 2, y: (164 + 17) * scale)
             }
-            .buttonStyle(.bordered)
         }
-        .padding(12)
-        .frame(width: 220, height: 150)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .frame(minWidth: 220, minHeight: 150)
         .contextMenu {
             Button("25 minutes") { vm.setDuration(25) }
             Button("30 minutes") { vm.setDuration(30) }
@@ -67,5 +63,51 @@ struct ContentView: View {
             }
             .padding(20)
         }
+    }
+
+    private func timeText(scale: CGFloat) -> some View {
+        Text(vm.displayText)
+            .font(.custom("Digital Numbers", size: 68 * scale))
+            .foregroundColor(.white)
+    }
+
+    private func startButton(scale: CGFloat) -> some View {
+        Button(action: vm.toggle) {
+            Text(vm.startLabel)
+                .font(.system(size: 17 * scale, weight: .semibold))
+                .foregroundColor(.black)
+                .frame(width: 170 * scale, height: 40 * scale)
+                .background(Capsule().fill(Color.white))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func stepper(scale: CGFloat) -> some View {
+        HStack(spacing: 0) {
+            Button(action: { vm.addMinutes(-10) }) {
+                Text("\u{2212}").frame(width: 37 * scale, height: 34 * scale)
+            }
+            Text("10m")
+                .font(.system(size: 15 * scale, weight: .semibold))
+            Button(action: { vm.addMinutes(10) }) {
+                Text("+").frame(width: 37 * scale, height: 34 * scale)
+            }
+        }
+        .font(.system(size: 15 * scale, weight: .semibold))
+        .foregroundColor(.white)
+        .frame(width: 150 * scale, height: 34 * scale)
+        .background(Capsule().strokeBorder(Color.white, lineWidth: 1))
+        .buttonStyle(.plain)
+    }
+
+    private func iconButton(systemName: String, scale: CGFloat, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 14 * scale, weight: .medium))
+                .foregroundColor(.white)
+                .frame(width: 50 * scale, height: 34 * scale)
+                .background(RoundedRectangle(cornerRadius: 10 * scale).strokeBorder(Color.white, lineWidth: 1))
+        }
+        .buttonStyle(.plain)
     }
 }

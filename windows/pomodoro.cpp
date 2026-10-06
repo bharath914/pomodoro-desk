@@ -1,25 +1,22 @@
 // Minimal always-on-top focus-timer overlay for Windows (Win32 + GDI, no dependencies).
 // All countdown logic lives in ../core/TimerEngine — this file is UI/rendering only.
 //
-// Build (MinGW):  g++ -O2 -s -mwindows -static pomodoro.cpp ../core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32 -lcomctl32
-// Build (MSVC):   cl /O2 /EHsc pomodoro.cpp ..\core\TimerEngine.cpp user32.lib gdi32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
+// Build (MinGW):  g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32 -lcomctl32
+// Build (MSVC):   cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp user32.lib gdi32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
 //
-// Drag anywhere to move. Hover to reveal controls. Space = start/pause. Right-click = menu (duration/custom/quit).
+// DigitalNumbers-Regular.ttf must sit next to the exe (loaded as a private, non-installed font).
+//
+// Drag anywhere to move, drag an edge/corner to resize. Space = start/pause. Right-click = menu (duration/custom/quit).
 
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
 #include "../core/TimerEngine.h"
 
-// ---------- palette (flat, Apple-dark inspired) ----------
-static const COLORREF kBg      = RGB(22, 22, 24);
-static const COLORREF kBtnRow  = RGB(38, 38, 40);
-static const COLORREF kBtn     = RGB(54, 54, 58);
-static const COLORREF kFg      = RGB(245, 245, 247);
-static const COLORREF kBlue    = RGB(10, 132, 255);
-static const COLORREF kGray    = RGB(142, 142, 147);
-static const COLORREF kRed     = RGB(255, 69, 58);
-static const COLORREF kOrange  = RGB(255, 159, 10);
+// ---------- palette ----------
+static const COLORREF kBg   = RGB(0, 0, 0);
+static const COLORREF kFg   = RGB(255, 255, 255);
+static const COLORREF kBlack = RGB(0, 0, 0);
 
 static HINSTANCE   g_hinst;
 static HWND        g_main = nullptr;
@@ -27,41 +24,67 @@ static HWND        g_popup = nullptr;
 static HWND        g_editCtl = nullptr;
 
 static TimerEngine g_timer(25);
-static bool        g_hover = false;
 static int         g_shownSecs = -1;
 static int         g_dpi = 96;
-static HFONT       g_fTime, g_fLabel, g_fBtnIcon, g_fBtnText, g_fPopup;
+static HFONT       g_fTime, g_fStart, g_fStep, g_fIcon, g_fPopup;
+static int         g_curW = 0, g_curH = 0;  // fonts sized for this client size; recreated when it changes
 
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
 static int64_t Now() { return (int64_t)GetTickCount64(); }
 
-// ---------- layout (96-dpi units) ----------
-static const int W = 216, H = 130;
-static const int BTN_W = 36, BTN_H = 26, BTN_GAP = 4, BTN_Y = 96;
-enum { B_PLAYPAUSE, B_PLUS5, B_PLUS10, B_RESET, B_CLOSE, B_COUNT };
+// ---------- base design layout, in 96-dpi logical units (scaled uniformly to fit the window) ----------
+static const int BASE_W = 320, BASE_H = 198;
+static const int MIN_W = 220, MIN_H = 150;
 
-enum {
-    ID_DUR_25 = 2001, ID_DUR_30, ID_DUR_45, ID_DUR_60, ID_DUR_120, ID_CUSTOM, ID_QUIT,
-    ID_EDIT = 3001, ID_SET = 3002,
+enum { ID_DUR_25 = 2001, ID_DUR_30, ID_DUR_45, ID_DUR_60, ID_DUR_120, ID_CUSTOM, ID_QUIT, ID_EDIT = 3001, ID_SET = 3002 };
+
+struct Layout {
+    double scale;
+    RECT time, startBtn, stepper, stepMinus, stepPlus, pauseBtn, resetBtn;
 };
 
-static RECT BtnRect(int i) {
-    int total = B_COUNT * BTN_W + (B_COUNT - 1) * BTN_GAP;
-    int x = (W - total) / 2 + i * (BTN_W + BTN_GAP);
-    RECT r = { S(x), S(BTN_Y), S(x + BTN_W), S(BTN_Y + BTN_H) };
+static RECT Xform(int cw, int ch, double s, int ox, int oy, int bx, int by, int bw, int bh) {
+    (void)cw; (void)ch;
+    RECT r;
+    r.left   = ox + (int)(bx * s);
+    r.top    = oy + (int)(by * s);
+    r.right  = ox + (int)((bx + bw) * s);
+    r.bottom = oy + (int)((by + bh) * s);
     return r;
 }
 
-static int HitButton(POINT p) {
-    if (!g_hover) return -1;
-    for (int i = 0; i < B_COUNT; i++) {
-        RECT r = BtnRect(i);
-        if (PtInRect(&r, p)) return i;
-    }
-    return -1;
+static Layout ComputeLayout(int cw, int ch) {
+    int baseW = S(BASE_W), baseH = S(BASE_H);
+    double sx = (double)cw / baseW, sy = (double)ch / baseH;
+    double s = sx < sy ? sx : sy;
+    int offX = (int)(cw - baseW * s) / 2;
+    int offY = (int)(ch - baseH * s) / 2;
+
+    Layout L;
+    L.scale = s;
+    L.time     = Xform(cw, ch, s, offX, offY, 0, 14, BASE_W, 86);
+    L.startBtn = Xform(cw, ch, s, offX, offY, 75, 112, 170, 40);
+    L.stepper  = Xform(cw, ch, s, offX, offY, 27, 164, 150, 34);
+    L.pauseBtn = Xform(cw, ch, s, offX, offY, 185, 164, 50, 34);
+    L.resetBtn = Xform(cw, ch, s, offX, offY, 243, 164, 50, 34);
+    int stepW = L.stepper.right - L.stepper.left;
+    int quarter = stepW / 4;
+    L.stepMinus = { L.stepper.left, L.stepper.top, L.stepper.left + quarter, L.stepper.bottom };
+    L.stepPlus  = { L.stepper.right - quarter, L.stepper.top, L.stepper.right, L.stepper.bottom };
+    return L;
 }
 
-// Parses a user-typed wide string into an integer (used for the custom-minutes edit box).
+enum { HIT_NONE = -1, HIT_START, HIT_STEP_MINUS, HIT_STEP_PLUS, HIT_PAUSE, HIT_RESET };
+
+static int HitButton(const Layout& L, POINT p) {
+    if (PtInRect(&L.startBtn, p)) return HIT_START;
+    if (PtInRect(&L.stepMinus, p)) return HIT_STEP_MINUS;
+    if (PtInRect(&L.stepPlus, p)) return HIT_STEP_PLUS;
+    if (PtInRect(&L.pauseBtn, p)) return HIT_PAUSE;
+    if (PtInRect(&L.resetBtn, p)) return HIT_RESET;
+    return HIT_NONE;
+}
+
 static int ParseInt(const wchar_t* s) {
     int v = 0;
     for (; *s; s++) {
@@ -140,45 +163,75 @@ static HMENU BuildMenu() {
     return m;
 }
 
-static const wchar_t* StateLabel() {
+static const wchar_t* StartLabel() {
     switch (g_timer.state()) {
-    case TimerState::Running: return L"RUNNING";
-    case TimerState::Done:    return L"DONE";
-    case TimerState::Paused:  return L"PAUSED";
-    default:                  return L"READY";
+    case TimerState::Running: return L"Pause";
+    case TimerState::Paused:  return L"Resume";
+    default:                  return L"Start";
     }
 }
 
-static COLORREF StateColor() {
-    switch (g_timer.state()) {
-    case TimerState::Running: return kBlue;
-    case TimerState::Done:    return kRed;
-    default:                  return kGray;
-    }
-}
-
-static void Spaced(const wchar_t* in, wchar_t* out, size_t outCap) {
-    size_t j = 0;
-    for (size_t i = 0; in[i] && j + 2 < outCap; i++) {
-        out[j++] = in[i];
-        if (in[i + 1]) out[j++] = L' ';
-    }
-    out[j] = 0;
-}
-
-static void DrawText2(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c, UINT fmt) {
+static void DrawCentered(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c) {
     SelectObject(dc, f);
     SetTextColor(dc, c);
-    DrawTextW(dc, t, -1, &r, fmt | DT_SINGLELINE | DT_NOPREFIX);
+    DrawTextW(dc, t, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+}
+
+// Pill: fully rounded ends (radius = half height). Rounded-square: modest corner radius.
+static void DrawPill(HDC dc, RECT r, COLORREF fill, COLORREF border) {
+    HBRUSH br = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBr = SelectObject(dc, br);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    int radius = r.bottom - r.top;
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, oldBr);
+    SelectObject(dc, oldPen);
+    DeleteObject(br);
+    DeleteObject(pen);
+}
+
+static void DrawRoundedSquare(HDC dc, RECT r, COLORREF fill, COLORREF border) {
+    HBRUSH br = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBr = SelectObject(dc, br);
+    HGDIOBJ oldPen = SelectObject(dc, pen);
+    int radius = (int)((r.bottom - r.top) * 0.4);
+    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
+    SelectObject(dc, oldBr);
+    SelectObject(dc, oldPen);
+    DeleteObject(br);
+    DeleteObject(pen);
+}
+
+static void RebuildFonts(double scale) {
+    if (g_fTime) DeleteObject(g_fTime);
+    if (g_fStart) DeleteObject(g_fStart);
+    if (g_fStep) DeleteObject(g_fStep);
+    if (g_fIcon) DeleteObject(g_fIcon);
+    auto px = [&](int base96) { return -(int)(S(base96) * scale); };
+    g_fTime  = CreateFontW(px(68), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Digital Numbers");
+    g_fStart = CreateFontW(px(17), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fStep  = CreateFontW(px(15), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fIcon  = CreateFontW(px(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
 }
 
 static void Paint(HWND h) {
     PAINTSTRUCT ps;
     HDC wdc = BeginPaint(h, &ps);
     RECT cr; GetClientRect(h, &cr);
+    int cw = cr.right, ch = cr.bottom;
+    if (cw <= 0 || ch <= 0) { EndPaint(h, &ps); return; }
+
+    if (cw != g_curW || ch != g_curH) {
+        g_curW = cw; g_curH = ch;
+        Layout tmp = ComputeLayout(cw, ch);
+        RebuildFonts(tmp.scale);
+    }
+    Layout L = ComputeLayout(cw, ch);
 
     HDC dc = CreateCompatibleDC(wdc);
-    HBITMAP bmp = CreateCompatibleBitmap(wdc, cr.right, cr.bottom);
+    HBITMAP bmp = CreateCompatibleBitmap(wdc, cw, ch);
     HGDIOBJ old = SelectObject(dc, bmp);
     SetBkMode(dc, TRANSPARENT);
 
@@ -186,80 +239,90 @@ static void Paint(HWND h) {
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
 
-    wchar_t lbl[32];
-    Spaced(StateLabel(), lbl, 32);
-    RECT lr = { 0, S(10), cr.right, S(26) };
-    DrawText2(dc, lbl, lr, g_fLabel, StateColor(), DT_CENTER | DT_VCENTER);
-
-    int64_t now = Now();
-    int s = g_timer.secsLeft(now);
+    int s = g_timer.secsLeft(Now());
     wchar_t buf[16];
     wsprintfW(buf, L"%02d:%02d", s / 60, s % 60);
-    COLORREF timeColor = kFg;
-    if (g_timer.state() == TimerState::Done) timeColor = kRed;
-    else if (g_timer.isRunning() && s <= 60) timeColor = kOrange;
-    RECT tr = { 0, S(28), cr.right, S(86) };
-    DrawText2(dc, buf, tr, g_fTime, timeColor, DT_CENTER | DT_VCENTER);
+    DrawCentered(dc, buf, L.time, g_fTime, kFg);
 
-    if (g_hover) {
-        RECT rowBg = { 0, S(BTN_Y - 6), cr.right, cr.bottom };
-        HBRUSH rowBrush = CreateSolidBrush(kBtnRow);
-        FillRect(dc, &rowBg, rowBrush);
-        DeleteObject(rowBrush);
+    DrawPill(dc, L.startBtn, kFg, kFg);
+    DrawCentered(dc, StartLabel(), L.startBtn, g_fStart, kBlack);
 
-        const wchar_t* glyph[B_COUNT] = { g_timer.isRunning() ? L"❚❚" : L"▶", L"+5", L"+10", L"↺", L"✕" };
-        HFONT fonts[B_COUNT] = { g_fBtnIcon, g_fBtnText, g_fBtnText, g_fBtnIcon, g_fBtnIcon };
-        HBRUSH bb = CreateSolidBrush(kBtn);
-        for (int i = 0; i < B_COUNT; i++) {
-            RECT r = BtnRect(i);
-            FillRect(dc, &r, bb);
-            DrawText2(dc, glyph[i], r, fonts[i], kFg, DT_CENTER | DT_VCENTER);
-        }
-        DeleteObject(bb);
-    }
+    DrawPill(dc, L.stepper, kBlack, kFg);
+    RECT midStep = { L.stepMinus.right, L.stepper.top, L.stepPlus.left, L.stepper.bottom };
+    DrawCentered(dc, L"−", L.stepMinus, g_fStep, kFg);
+    DrawCentered(dc, L"10m", midStep, g_fStep, kFg);
+    DrawCentered(dc, L"+", L.stepPlus, g_fStep, kFg);
 
-    BitBlt(wdc, 0, 0, cr.right, cr.bottom, dc, 0, 0, SRCCOPY);
+    DrawRoundedSquare(dc, L.pauseBtn, kBlack, kFg);
+    DrawCentered(dc, g_timer.isRunning() ? L"❚❚" : L"▶", L.pauseBtn, g_fIcon, kFg);
+
+    DrawRoundedSquare(dc, L.resetBtn, kBlack, kFg);
+    DrawCentered(dc, L"↺", L.resetBtn, g_fIcon, kFg);
+
+    BitBlt(wdc, 0, 0, cw, ch, dc, 0, 0, SRCCOPY);
     SelectObject(dc, old);
     DeleteObject(bmp);
     DeleteDC(dc);
     EndPaint(h, &ps);
 }
 
-static void ArmLeave(HWND h, bool nc) {
-    TRACKMOUSEEVENT tme = { sizeof(tme) };
-    tme.dwFlags = TME_LEAVE | (nc ? TME_NONCLIENT : 0);
-    tme.hwndTrack = h;
-    TrackMouseEvent(&tme);
+static void ApplyRoundedRegion(HWND h, int cw, int ch) {
+    int radius = (int)(S(22) * ComputeLayout(cw, ch).scale);
+    int maxRadius = (cw < ch ? cw : ch) / 2;
+    if (radius > maxRadius) radius = maxRadius;
+    SetWindowRgn(h, CreateRoundRectRgn(0, 0, cw + 1, ch + 1, radius, radius), TRUE);
 }
 
 static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     switch (m) {
+    case WM_NCCALCSIZE:
+        if (w) return 0;  // claim the whole window as client area (no OS-drawn frame)
+        break;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO* mmi = (MINMAXINFO*)l;
+        mmi->ptMinTrackSize.x = S(MIN_W);
+        mmi->ptMinTrackSize.y = S(MIN_H);
+        return 0;
+    }
     case WM_NCHITTEST: {
         POINT p = { (short)LOWORD(l), (short)HIWORD(l) };
-        ScreenToClient(h, &p);
-        return HitButton(p) >= 0 ? HTCLIENT : HTCAPTION;   // drag from anywhere but buttons
+        RECT wr; GetWindowRect(h, &wr);
+        const int edge = S(8);
+        bool left = p.x < wr.left + edge, right = p.x >= wr.right - edge;
+        bool top = p.y < wr.top + edge, bottom = p.y >= wr.bottom - edge;
+        if (top && left) return HTTOPLEFT;
+        if (top && right) return HTTOPRIGHT;
+        if (bottom && left) return HTBOTTOMLEFT;
+        if (bottom && right) return HTBOTTOMRIGHT;
+        if (left) return HTLEFT;
+        if (right) return HTRIGHT;
+        if (top) return HTTOP;
+        if (bottom) return HTBOTTOM;
+
+        POINT cp = p;
+        ScreenToClient(h, &cp);
+        RECT cr; GetClientRect(h, &cr);
+        Layout L = ComputeLayout(cr.right, cr.bottom);
+        return HitButton(L, cp) != HIT_NONE ? HTCLIENT : HTCAPTION;
     }
-    case WM_MOUSEMOVE:
-        if (!g_hover) { g_hover = true; InvalidateRect(h, nullptr, FALSE); }
-        ArmLeave(h, false);
-        return 0;
-    case WM_NCMOUSEMOVE:
-        if (!g_hover) { g_hover = true; InvalidateRect(h, nullptr, FALSE); }
-        ArmLeave(h, true);
-        return 0;
-    case WM_MOUSELEAVE:
-    case WM_NCMOUSELEAVE:
-        g_hover = false;
+    case WM_SIZE:
         InvalidateRect(h, nullptr, FALSE);
         return 0;
+    case WM_WINDOWPOSCHANGED: {
+        RECT cr; GetClientRect(h, &cr);
+        if (cr.right > 0 && cr.bottom > 0) ApplyRoundedRegion(h, cr.right, cr.bottom);
+        break;
+    }
     case WM_LBUTTONDOWN: {
         POINT p = { (short)LOWORD(l), (short)HIWORD(l) };
-        switch (HitButton(p)) {
-        case B_PLAYPAUSE: UiToggle(h); break;
-        case B_PLUS5:  UiAddMinutes(h, 5); break;
-        case B_PLUS10: UiAddMinutes(h, 10); break;
-        case B_RESET:  UiReset(h); break;
-        case B_CLOSE:  DestroyWindow(h); break;
+        RECT cr; GetClientRect(h, &cr);
+        Layout L = ComputeLayout(cr.right, cr.bottom);
+        switch (HitButton(L, p)) {
+        case HIT_START:      UiToggle(h); break;
+        case HIT_STEP_MINUS: UiAddMinutes(h, -10); break;
+        case HIT_STEP_PLUS:  UiAddMinutes(h, 10); break;
+        case HIT_PAUSE:      UiToggle(h); break;
+        case HIT_RESET:      UiReset(h); break;
         }
         return 0;
     }
@@ -308,8 +371,14 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProc(h, m, w, l);
 }
 
-static HFONT MakeFont(int px, int weight, const wchar_t* face) {
-    return CreateFontW(-S(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, face);
+static void LoadEmbeddedFont() {
+    wchar_t exePath[MAX_PATH];
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    wchar_t* slash = wcsrchr(exePath, L'\\');
+    if (slash) *(slash + 1) = 0;
+    wchar_t fontPath[MAX_PATH];
+    wsprintfW(fontPath, L"%sDigitalNumbers-Regular.ttf", exePath);
+    AddFontResourceExW(fontPath, FR_PRIVATE, 0);
 }
 
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
@@ -319,11 +388,9 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     g_dpi = GetDeviceCaps(sdc, LOGPIXELSX);
     ReleaseDC(nullptr, sdc);
 
-    g_fTime    = MakeFont(34, FW_NORMAL, L"Segoe UI Light");
-    g_fLabel   = MakeFont(11, FW_SEMIBOLD, L"Segoe UI");
-    g_fBtnIcon = MakeFont(13, FW_NORMAL, L"Segoe UI Symbol");
-    g_fBtnText = MakeFont(12, FW_SEMIBOLD, L"Segoe UI");
-    g_fPopup   = MakeFont(14, FW_NORMAL, L"Segoe UI");
+    LoadEmbeddedFont();
+    RebuildFonts(1.0);
+    g_fPopup = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
@@ -341,9 +408,9 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     RegisterClassW(&pc);
 
     g_main = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, wc.lpszClassName, L"Pomodoro",
-                              WS_POPUP, S(40), S(40), S(W), S(H), nullptr, nullptr, hi, nullptr);
+                              WS_POPUP | WS_THICKFRAME, S(60), S(60), S(BASE_W), S(BASE_H),
+                              nullptr, nullptr, hi, nullptr);
     SetLayeredWindowAttributes(g_main, 0, 250, LWA_ALPHA);
-    SetWindowRgn(g_main, CreateRoundRectRgn(0, 0, S(W) + 1, S(H) + 1, S(18), S(18)), TRUE);
     SetTimer(g_main, 1, 200, nullptr);
     ShowWindow(g_main, SW_SHOWNOACTIVATE);
     UpdateWindow(g_main);
