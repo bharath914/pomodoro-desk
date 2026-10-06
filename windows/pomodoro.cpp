@@ -1,59 +1,74 @@
-// Minimal always-on-top focus-timer overlay for Windows (Win32 + GDI, no dependencies).
-// All countdown logic lives in ../core/TimerEngine — this file is UI/rendering only.
+// Minimal always-on-top Pomodoro overlay for Windows (Win32 + GDI, no dependencies).
+// All countdown/cycle logic lives in ../core/TimerEngine — this file is UI/rendering only.
 //
-// Build (MinGW):  g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32 -lcomctl32
-// Build (MSVC):   cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp user32.lib gdi32.lib comctl32.lib /link /SUBSYSTEM:WINDOWS
+// Build (MinGW):  g++ -O2 -s -mwindows -static windows/pomodoro.cpp core/TimerEngine.cpp -o pomodoro.exe -lgdi32 -luser32
+// Build (MSVC):   cl /O2 /EHsc windows\pomodoro.cpp core\TimerEngine.cpp user32.lib gdi32.lib /link /SUBSYSTEM:WINDOWS
 //
-// DigitalNumbers-Regular.ttf must sit next to the exe (loaded as a private, non-installed font).
-//
-// Drag anywhere to move, drag an edge/corner to resize. Space = start/pause. Right-click = menu (duration/custom/quit).
+// Shows up in the taskbar (can be minimized back from there). Drag anywhere to move,
+// drag an edge/corner to resize (aspect ratio locked, so it always scales as a whole).
+// Space = start/pause. Esc or the close button = quit.
 
 #define UNICODE
 #define _UNICODE
 #include <windows.h>
+#include <cmath>
 #include "../core/TimerEngine.h"
 
 // ---------- palette ----------
-static const COLORREF kBg   = RGB(0, 0, 0);
-static const COLORREF kFg   = RGB(255, 255, 255);
-static const COLORREF kBlack = RGB(0, 0, 0);
+static const COLORREF kBg        = RGB(11, 11, 11);
+static const COLORREF kSegTrack  = RGB(29, 29, 31);
+static const COLORREF kResetBg   = RGB(21, 21, 23);
+static const COLORREF kRing      = RGB(58, 57, 62);
+static const COLORREF kSecondary = RGB(155, 155, 158);
+static const COLORREF kWhite     = RGB(255, 255, 255);
+static const COLORREF kBlack     = RGB(0, 0, 0);
 
-static HINSTANCE   g_hinst;
-static HWND        g_main = nullptr;
-static HWND        g_popup = nullptr;
-static HWND        g_editCtl = nullptr;
-
-static TimerEngine g_timer(25);
-static int         g_shownSecs = -1;
-static int         g_dpi = 96;
-static HFONT       g_fTime, g_fStart, g_fStep, g_fIcon, g_fPopup;
-static int         g_curW = 0, g_curH = 0;  // fonts sized for this client size; recreated when it changes
+static HINSTANCE g_hinst;
+static HWND      g_main = nullptr;
+static TimerEngine g_timer;
+static int        g_shownSecs = -1;
+static int        g_dpi = 96;
+static int        g_curW = 0, g_curH = 0;
+static HFONT      g_fTime, g_fMode, g_fTab, g_fButton, g_fSessions, g_fIcon;
 
 static int S(int v) { return MulDiv(v, g_dpi, 96); }
 static int64_t Now() { return (int64_t)GetTickCount64(); }
 
 // ---------- base design layout, in 96-dpi logical units (scaled uniformly to fit the window) ----------
-static const int BASE_W = 320, BASE_H = 198;
-static const int MIN_W = 220, MIN_H = 150;
+static const int BASE_W = 466, BASE_H = 568;
+static const int MIN_W = 300, MIN_H = 360;
+static const int EDGE = 8;
 
-enum { ID_DUR_25 = 2001, ID_DUR_30, ID_DUR_45, ID_DUR_60, ID_DUR_120, ID_CUSTOM, ID_QUIT, ID_EDIT = 3001, ID_SET = 3002 };
+static const wchar_t* kTabLabels[3] = { L"Focus", L"Short break", L"Long break" };
 
 struct Layout {
     double scale;
-    RECT time, startBtn, stepper, stepMinus, stepPlus, pauseBtn, resetBtn;
+    RECT topbarClose, topbarMin;
+    RECT segTrack;
+    RECT tabs[3];
+    int ringCx, ringCy, ringR, ringThickness;
+    RECT startBtn, resetBtn;
+    int dotsY, dotR, dotGap;
 };
 
-static RECT Xform(int cw, int ch, double s, int ox, int oy, int bx, int by, int bw, int bh) {
-    (void)cw; (void)ch;
+static RECT Xform(double s, int ox, int oy, int bx, int by, int bw, int bh) {
     RECT r;
-    r.left   = ox + (int)(bx * s);
-    r.top    = oy + (int)(by * s);
-    r.right  = ox + (int)((bx + bw) * s);
+    r.left = ox + (int)(bx * s);
+    r.top = oy + (int)(by * s);
+    r.right = ox + (int)((bx + bw) * s);
     r.bottom = oy + (int)((by + bh) * s);
     return r;
 }
 
-static Layout ComputeLayout(int cw, int ch) {
+static int TextWidthPx(HDC dc, HFONT f, const wchar_t* text) {
+    HGDIOBJ old = SelectObject(dc, f);
+    SIZE sz;
+    GetTextExtentPoint32W(dc, text, (int)wcslen(text), &sz);
+    SelectObject(dc, old);
+    return sz.cx;
+}
+
+static Layout ComputeLayout(HDC dc, int cw, int ch) {
     int baseW = S(BASE_W), baseH = S(BASE_H);
     double sx = (double)cw / baseW, sy = (double)ch / baseH;
     double s = sx < sy ? sx : sy;
@@ -62,113 +77,72 @@ static Layout ComputeLayout(int cw, int ch) {
 
     Layout L;
     L.scale = s;
-    L.time     = Xform(cw, ch, s, offX, offY, 0, 14, BASE_W, 86);
-    L.startBtn = Xform(cw, ch, s, offX, offY, 75, 112, 170, 40);
-    L.stepper  = Xform(cw, ch, s, offX, offY, 27, 164, 150, 34);
-    L.pauseBtn = Xform(cw, ch, s, offX, offY, 185, 164, 50, 34);
-    L.resetBtn = Xform(cw, ch, s, offX, offY, 243, 164, 50, 34);
-    int stepW = L.stepper.right - L.stepper.left;
-    int quarter = stepW / 4;
-    L.stepMinus = { L.stepper.left, L.stepper.top, L.stepper.left + quarter, L.stepper.bottom };
-    L.stepPlus  = { L.stepper.right - quarter, L.stepper.top, L.stepper.right, L.stepper.bottom };
+    L.topbarClose = Xform(s, offX, offY, 422, 6, 28, 28);
+    L.topbarMin   = Xform(s, offX, offY, 388, 6, 28, 28);
+
+    int tabPad = (int)(S(14) * s);
+    int tabH = (int)(S(46) * s);
+    int tabW[3];
+    int totalTabW = 0;
+    for (int i = 0; i < 3; i++) {
+        tabW[i] = TextWidthPx(dc, g_fTab, kTabLabels[i]) + tabPad * 2;
+        totalTabW += tabW[i];
+    }
+    int trackPad = (int)(S(5) * s);
+    int trackW = totalTabW + trackPad * 2;
+    int trackX = offX + (int)(baseW * s) / 2 - trackW / 2;
+    int trackY = offY + (int)(S(54) * s);
+    L.segTrack = { trackX, trackY, trackX + trackW, trackY + tabH + trackPad * 2 };
+    int tx = trackX + trackPad;
+    for (int i = 0; i < 3; i++) {
+        L.tabs[i] = { tx, trackY + trackPad, tx + tabW[i], trackY + trackPad + tabH };
+        tx += tabW[i];
+    }
+
+    L.ringCx = offX + (int)(S(233) * s);
+    L.ringCy = offY + (int)(S(264) * s);
+    L.ringR = (int)(S(115) * s);
+    L.ringThickness = (int)(S(13) * s);
+
+    L.startBtn = Xform(s, offX, offY, 107, 420, 120, 59);
+    L.resetBtn = Xform(s, offX, offY, 239, 420, 120, 59);
+
+    L.dotsY = offY + (int)(S(523) * s);
+    L.dotR = (int)(S(6) * s);
+    L.dotGap = (int)(S(8) * s);
     return L;
 }
 
-enum { HIT_NONE = -1, HIT_START, HIT_STEP_MINUS, HIT_STEP_PLUS, HIT_PAUSE, HIT_RESET };
+enum { HIT_NONE = -1, HIT_CLOSE, HIT_MIN, HIT_TAB0, HIT_TAB1, HIT_TAB2, HIT_START, HIT_RESET };
 
 static int HitButton(const Layout& L, POINT p) {
+    if (PtInRect(&L.topbarClose, p)) return HIT_CLOSE;
+    if (PtInRect(&L.topbarMin, p)) return HIT_MIN;
+    for (int i = 0; i < 3; i++) if (PtInRect(&L.tabs[i], p)) return HIT_TAB0 + i;
     if (PtInRect(&L.startBtn, p)) return HIT_START;
-    if (PtInRect(&L.stepMinus, p)) return HIT_STEP_MINUS;
-    if (PtInRect(&L.stepPlus, p)) return HIT_STEP_PLUS;
-    if (PtInRect(&L.pauseBtn, p)) return HIT_PAUSE;
     if (PtInRect(&L.resetBtn, p)) return HIT_RESET;
     return HIT_NONE;
 }
 
-static int ParseInt(const wchar_t* s) {
-    int v = 0;
-    for (; *s; s++) {
-        if (*s < L'0' || *s > L'9') break;
-        v = v * 10 + (*s - L'0');
-    }
-    return v;
-}
-
 static void UiToggle(HWND h) { g_timer.toggle(Now()); InvalidateRect(h, nullptr, FALSE); }
 static void UiReset(HWND h) { g_timer.reset(); InvalidateRect(h, nullptr, FALSE); }
-static void UiAddMinutes(HWND h, int m) { g_timer.addMinutes(m); InvalidateRect(h, nullptr, FALSE); }
-static void UiSetDuration(HWND h, int minutes) { g_timer.setDuration(minutes); InvalidateRect(h, nullptr, FALSE); }
-
-static void CommitCustom() {
-    if (!g_popup) return;
-    wchar_t buf[16];
-    GetWindowTextW(g_editCtl, buf, 16);
-    int mins = ClampMinutes(ParseInt(buf));
-    UiSetDuration(g_main, mins);
-    DestroyWindow(g_popup);
-}
-
-static LRESULT CALLBACK PopupProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    switch (m) {
-    case WM_CREATE: {
-        wchar_t init[8];
-        wsprintfW(init, L"%d", (int)(g_timer.durationMs() / 60000));
-        HWND lbl = CreateWindowW(L"STATIC", L"Minutes (1-999):", WS_CHILD | WS_VISIBLE,
-                                  S(10), S(8), S(160), S(18), h, nullptr, g_hinst, nullptr);
-        g_editCtl = CreateWindowW(L"EDIT", init, WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
-                                   S(10), S(30), S(80), S(24), h, (HMENU)ID_EDIT, g_hinst, nullptr);
-        HWND btn = CreateWindowW(L"BUTTON", L"Set", WS_CHILD | WS_VISIBLE,
-                                  S(100), S(30), S(60), S(24), h, (HMENU)ID_SET, g_hinst, nullptr);
-        SendMessage(lbl, WM_SETFONT, (WPARAM)g_fPopup, TRUE);
-        SendMessage(g_editCtl, WM_SETFONT, (WPARAM)g_fPopup, TRUE);
-        SendMessage(btn, WM_SETFONT, (WPARAM)g_fPopup, TRUE);
-        SetFocus(g_editCtl);
-        SendMessage(g_editCtl, EM_SETSEL, 0, -1);
-        return 0;
-    }
-    case WM_COMMAND:
-        if (LOWORD(w) == ID_SET && HIWORD(w) == BN_CLICKED) CommitCustom();
-        return 0;
-    case WM_ACTIVATE:
-        if (LOWORD(w) == WA_INACTIVE) DestroyWindow(h);
-        return 0;
-    case WM_DESTROY:
-        g_popup = nullptr;
-        g_editCtl = nullptr;
-        return 0;
-    }
-    return DefWindowProc(h, m, w, l);
-}
-
-static void ShowCustomPopup(HWND owner) {
-    if (g_popup) { SetFocus(g_editCtl); return; }
-    RECT r; GetWindowRect(owner, &r);
-    g_popup = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, L"PomoInput", L"Set Timer",
-                               WS_POPUP | WS_BORDER, r.left, r.bottom + S(4), S(180), S(90),
-                               owner, nullptr, g_hinst, nullptr);
-    ShowWindow(g_popup, SW_SHOW);
-}
-
-static HMENU BuildMenu() {
-    HMENU m = CreatePopupMenu();
-    AppendMenuW(m, MF_STRING, ID_DUR_25, L"25 minutes");
-    AppendMenuW(m, MF_STRING, ID_DUR_30, L"30 minutes");
-    AppendMenuW(m, MF_STRING, ID_DUR_45, L"45 minutes");
-    AppendMenuW(m, MF_STRING, ID_DUR_60, L"1 hour");
-    AppendMenuW(m, MF_STRING, ID_DUR_120, L"2 hours");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_CUSTOM, L"Custom…");
-    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit");
-    return m;
-}
+static void UiSelectMode(HWND h, Mode m) { g_timer.selectMode(m); InvalidateRect(h, nullptr, FALSE); }
 
 static const wchar_t* StartLabel() {
     switch (g_timer.state()) {
-    case TimerState::Running: return L"Pause";
-    case TimerState::Paused:  return L"Resume";
-    default:                  return L"Start";
+    case RunState::Running: return L"Pause";
+    case RunState::Paused:  return L"Resume";
+    default:                return L"Start";
     }
+}
+
+static const wchar_t* ModeLabel(Mode m) {
+    switch (m) {
+    case Mode::Focus:      return L"Focus";
+    case Mode::ShortBreak: return L"Short break";
+    case Mode::LongBreak:  return L"Long break";
+    }
+    return L"Focus";
 }
 
 static void DrawCentered(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c) {
@@ -177,10 +151,9 @@ static void DrawCentered(HDC dc, const wchar_t* t, RECT r, HFONT f, COLORREF c) 
     DrawTextW(dc, t, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
-// Pill: fully rounded ends (radius = half height). Rounded-square: modest corner radius.
-static void DrawPill(HDC dc, RECT r, COLORREF fill, COLORREF border) {
+static void FillRoundedRect(HDC dc, RECT r, COLORREF fill) {
     HBRUSH br = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HPEN pen = CreatePen(PS_SOLID, 1, fill);
     HGDIOBJ oldBr = SelectObject(dc, br);
     HGDIOBJ oldPen = SelectObject(dc, pen);
     int radius = r.bottom - r.top;
@@ -191,29 +164,42 @@ static void DrawPill(HDC dc, RECT r, COLORREF fill, COLORREF border) {
     DeleteObject(pen);
 }
 
-static void DrawRoundedSquare(HDC dc, RECT r, COLORREF fill, COLORREF border) {
-    HBRUSH br = CreateSolidBrush(fill);
-    HPEN pen = CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBr = SelectObject(dc, br);
+static void DrawRing(HDC dc, int cx, int cy, int r, int thickness, double progress) {
+    LOGBRUSH lb = { BS_SOLID, kRing, 0 };
+    HPEN pen = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_FLAT | PS_JOIN_ROUND, thickness, &lb, 0, nullptr);
     HGDIOBJ oldPen = SelectObject(dc, pen);
-    int radius = (int)((r.bottom - r.top) * 0.4);
-    RoundRect(dc, r.left, r.top, r.right, r.bottom, radius, radius);
-    SelectObject(dc, oldBr);
+    SelectObject(dc, GetStockObject(NULL_BRUSH));
+    MoveToEx(dc, cx + r, cy, nullptr);
+    AngleArc(dc, cx, cy, r, 0.0f, 360.0f);
     SelectObject(dc, oldPen);
-    DeleteObject(br);
     DeleteObject(pen);
+
+    if (progress > 0.0015) {
+        if (progress > 1.0) progress = 1.0;
+        LOGBRUSH lb2 = { BS_SOLID, kWhite, 0 };
+        HPEN pen2 = ExtCreatePen(PS_GEOMETRIC | PS_SOLID | PS_ENDCAP_FLAT | PS_JOIN_ROUND, thickness, &lb2, 0, nullptr);
+        SelectObject(dc, pen2);
+        MoveToEx(dc, cx, cy - r, nullptr);
+        AngleArc(dc, cx, cy, r, 90.0f, (float)(-progress * 360.0));
+        SelectObject(dc, oldPen);
+        DeleteObject(pen2);
+    }
 }
 
 static void RebuildFonts(double scale) {
     if (g_fTime) DeleteObject(g_fTime);
-    if (g_fStart) DeleteObject(g_fStart);
-    if (g_fStep) DeleteObject(g_fStep);
+    if (g_fMode) DeleteObject(g_fMode);
+    if (g_fTab) DeleteObject(g_fTab);
+    if (g_fButton) DeleteObject(g_fButton);
+    if (g_fSessions) DeleteObject(g_fSessions);
     if (g_fIcon) DeleteObject(g_fIcon);
     auto px = [&](int base96) { return -(int)(S(base96) * scale); };
-    g_fTime  = CreateFontW(px(68), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Digital Numbers");
-    g_fStart = CreateFontW(px(17), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    g_fStep  = CreateFontW(px(15), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
-    g_fIcon  = CreateFontW(px(15), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI Symbol");
+    g_fTime     = CreateFontW(px(46), 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fMode     = CreateFontW(px(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fTab      = CreateFontW(px(13), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fButton   = CreateFontW(px(15), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fSessions = CreateFontW(px(12), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
+    g_fIcon     = CreateFontW(px(16), 0, 0, 0, FW_SEMIBOLD, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 }
 
 static void Paint(HWND h) {
@@ -225,10 +211,10 @@ static void Paint(HWND h) {
 
     if (cw != g_curW || ch != g_curH) {
         g_curW = cw; g_curH = ch;
-        Layout tmp = ComputeLayout(cw, ch);
+        Layout tmp = ComputeLayout(wdc, cw, ch);
         RebuildFonts(tmp.scale);
     }
-    Layout L = ComputeLayout(cw, ch);
+    Layout L = ComputeLayout(wdc, cw, ch);
 
     HDC dc = CreateCompatibleDC(wdc);
     HBITMAP bmp = CreateCompatibleBitmap(wdc, cw, ch);
@@ -239,25 +225,61 @@ static void Paint(HWND h) {
     FillRect(dc, &cr, bg);
     DeleteObject(bg);
 
-    int s = g_timer.secsLeft(Now());
+    DrawCentered(dc, L"—", L.topbarMin, g_fIcon, kSecondary);
+    DrawCentered(dc, L"×", L.topbarClose, g_fIcon, kSecondary);
+
+    FillRoundedRect(dc, L.segTrack, kSegTrack);
+    Mode cur = g_timer.mode();
+    for (int i = 0; i < 3; i++) {
+        bool selected = (int)cur == i;
+        if (selected) FillRoundedRect(dc, L.tabs[i], kWhite);
+        DrawCentered(dc, kTabLabels[i], L.tabs[i], g_fTab, selected ? kBlack : kSecondary);
+    }
+
+    int64_t now = Now();
+    double total = (double)TimerEngine::durationForMode(cur);
+    double remain = (double)g_timer.remainingMs(now);
+    double progress = total > 0 ? 1.0 - (remain / total) : 0.0;
+    DrawRing(dc, L.ringCx, L.ringCy, L.ringR, L.ringThickness, progress);
+
+    int s = g_timer.secsLeft(now);
     wchar_t buf[16];
     wsprintfW(buf, L"%02d:%02d", s / 60, s % 60);
-    DrawCentered(dc, buf, L.time, g_fTime, kFg);
+    int timeBoxH = (int)(S(56) * L.scale);
+    RECT timeBox = { L.ringCx - L.ringR, L.ringCy - timeBoxH - (int)(S(2) * L.scale), L.ringCx + L.ringR, L.ringCy - (int)(S(2) * L.scale) };
+    DrawCentered(dc, buf, timeBox, g_fTime, kWhite);
+    RECT modeBox = { L.ringCx - L.ringR, L.ringCy + (int)(S(6) * L.scale), L.ringCx + L.ringR, L.ringCy + (int)(S(6) * L.scale) + (int)(S(22) * L.scale) };
+    DrawCentered(dc, ModeLabel(cur), modeBox, g_fMode, kSecondary);
 
-    DrawPill(dc, L.startBtn, kFg, kFg);
-    DrawCentered(dc, StartLabel(), L.startBtn, g_fStart, kBlack);
+    FillRoundedRect(dc, L.startBtn, kWhite);
+    DrawCentered(dc, StartLabel(), L.startBtn, g_fButton, kBlack);
+    FillRoundedRect(dc, L.resetBtn, kResetBg);
+    DrawCentered(dc, L"Reset", L.resetBtn, g_fButton, kSecondary);
 
-    DrawPill(dc, L.stepper, kBlack, kFg);
-    RECT midStep = { L.stepMinus.right, L.stepper.top, L.stepPlus.left, L.stepper.bottom };
-    DrawCentered(dc, L"−", L.stepMinus, g_fStep, kFg);
-    DrawCentered(dc, L"10m", midStep, g_fStep, kFg);
-    DrawCentered(dc, L"+", L.stepPlus, g_fStep, kFg);
+    int cyclePos = g_timer.cyclePosition();
+    int dotsTotalW = 4 * (L.dotR * 2) + 3 * L.dotGap;
+    wchar_t sessionsText[32];
+    int sessions = g_timer.completedSessions();
+    wsprintfW(sessionsText, L"%d session%s", sessions, sessions == 1 ? L"" : L"s");
+    int sessionsW = TextWidthPx(dc, g_fSessions, sessionsText);
+    int gapPx = (int)(S(12) * L.scale);
+    int clusterW = dotsTotalW + gapPx + sessionsW;
+    int clusterX = (cw - clusterW) / 2;
 
-    DrawRoundedSquare(dc, L.pauseBtn, kBlack, kFg);
-    DrawCentered(dc, g_timer.isRunning() ? L"❚❚" : L"▶", L.pauseBtn, g_fIcon, kFg);
-
-    DrawRoundedSquare(dc, L.resetBtn, kBlack, kFg);
-    DrawCentered(dc, L"↺", L.resetBtn, g_fIcon, kFg);
+    HBRUSH dotLit = CreateSolidBrush(kWhite);
+    HBRUSH dotDim = CreateSolidBrush(kRing);
+    for (int i = 0; i < 4; i++) {
+        int dcx = clusterX + L.dotR + i * (L.dotR * 2 + L.dotGap);
+        HGDIOBJ oldB = SelectObject(dc, i < cyclePos ? dotLit : dotDim);
+        HGDIOBJ oldP = SelectObject(dc, GetStockObject(NULL_PEN));
+        Ellipse(dc, dcx - L.dotR, L.dotsY - L.dotR, dcx + L.dotR, L.dotsY + L.dotR);
+        SelectObject(dc, oldB);
+        SelectObject(dc, oldP);
+    }
+    DeleteObject(dotLit);
+    DeleteObject(dotDim);
+    RECT sessionsBox = { clusterX + dotsTotalW + gapPx, L.dotsY - (int)(S(10) * L.scale), clusterX + clusterW, L.dotsY + (int)(S(10) * L.scale) };
+    DrawCentered(dc, sessionsText, sessionsBox, g_fSessions, kSecondary);
 
     BitBlt(wdc, 0, 0, cw, ch, dc, 0, 0, SRCCOPY);
     SelectObject(dc, old);
@@ -266,8 +288,8 @@ static void Paint(HWND h) {
     EndPaint(h, &ps);
 }
 
-static void ApplyRoundedRegion(HWND h, int cw, int ch) {
-    int radius = (int)(S(22) * ComputeLayout(cw, ch).scale);
+static void ApplyRoundedRegion(HWND h, int cw, int ch, double scale) {
+    int radius = (int)(S(24) * scale);
     int maxRadius = (cw < ch ? cw : ch) / 2;
     if (radius > maxRadius) radius = maxRadius;
     SetWindowRgn(h, CreateRoundRectRgn(0, 0, cw + 1, ch + 1, radius, radius), TRUE);
@@ -283,6 +305,27 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         mmi->ptMinTrackSize.x = S(MIN_W);
         mmi->ptMinTrackSize.y = S(MIN_H);
         return 0;
+    }
+    case WM_SIZING: {
+        // Lock the aspect ratio to BASE_W:BASE_H so the whole layout always visibly
+        // scales together, even when the user only drags a single edge.
+        RECT* r = (RECT*)l;
+        int rawW = r->right - r->left, rawH = r->bottom - r->top;
+        double scaleW = (double)rawW / S(BASE_W), scaleH = (double)rawH / S(BASE_H);
+        WPARAM edge = w;
+        bool horiz = (edge == WMSZ_LEFT || edge == WMSZ_RIGHT || edge == WMSZ_TOPLEFT ||
+                      edge == WMSZ_TOPRIGHT || edge == WMSZ_BOTTOMLEFT || edge == WMSZ_BOTTOMRIGHT);
+        bool vert = (edge == WMSZ_TOP || edge == WMSZ_BOTTOM || edge == WMSZ_TOPLEFT ||
+                     edge == WMSZ_TOPRIGHT || edge == WMSZ_BOTTOMLEFT || edge == WMSZ_BOTTOMRIGHT);
+        double scale = (horiz && vert) ? (scaleW > scaleH ? scaleW : scaleH) : (vert ? scaleH : scaleW);
+        int newW = (int)(S(BASE_W) * scale), newH = (int)(S(BASE_H) * scale);
+        if (newW < S(MIN_W)) { scale = (double)S(MIN_W) / S(BASE_W); newW = S(MIN_W); newH = (int)(S(BASE_H) * scale); }
+        if (newH < S(MIN_H)) { scale = (double)S(MIN_H) / S(BASE_H); newH = S(MIN_H); newW = (int)(S(BASE_W) * scale); }
+        if (edge == WMSZ_LEFT || edge == WMSZ_TOPLEFT || edge == WMSZ_BOTTOMLEFT) r->left = r->right - newW;
+        else r->right = r->left + newW;
+        if (edge == WMSZ_TOP || edge == WMSZ_TOPLEFT || edge == WMSZ_TOPRIGHT) r->top = r->bottom - newH;
+        else r->bottom = r->top + newH;
+        return TRUE;
     }
     case WM_NCHITTEST: {
         POINT p = { (short)LOWORD(l), (short)HIWORD(l) };
@@ -302,7 +345,9 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         POINT cp = p;
         ScreenToClient(h, &cp);
         RECT cr; GetClientRect(h, &cr);
-        Layout L = ComputeLayout(cr.right, cr.bottom);
+        HDC dc = GetDC(h);
+        Layout L = ComputeLayout(dc, cr.right, cr.bottom);
+        ReleaseDC(h, dc);
         return HitButton(L, cp) != HIT_NONE ? HTCLIENT : HTCAPTION;
     }
     case WM_SIZE:
@@ -310,39 +355,28 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
     case WM_WINDOWPOSCHANGED: {
         RECT cr; GetClientRect(h, &cr);
-        if (cr.right > 0 && cr.bottom > 0) ApplyRoundedRegion(h, cr.right, cr.bottom);
+        if (cr.right > 0 && cr.bottom > 0) {
+            HDC dc = GetDC(h);
+            double scale = ComputeLayout(dc, cr.right, cr.bottom).scale;
+            ReleaseDC(h, dc);
+            ApplyRoundedRegion(h, cr.right, cr.bottom, scale);
+        }
         break;
     }
     case WM_LBUTTONDOWN: {
         POINT p = { (short)LOWORD(l), (short)HIWORD(l) };
         RECT cr; GetClientRect(h, &cr);
-        Layout L = ComputeLayout(cr.right, cr.bottom);
+        HDC dc = GetDC(h);
+        Layout L = ComputeLayout(dc, cr.right, cr.bottom);
+        ReleaseDC(h, dc);
         switch (HitButton(L, p)) {
-        case HIT_START:      UiToggle(h); break;
-        case HIT_STEP_MINUS: UiAddMinutes(h, -10); break;
-        case HIT_STEP_PLUS:  UiAddMinutes(h, 10); break;
-        case HIT_PAUSE:      UiToggle(h); break;
-        case HIT_RESET:      UiReset(h); break;
-        }
-        return 0;
-    }
-    case WM_CONTEXTMENU: {
-        int x = (short)LOWORD(l), y = (short)HIWORD(l);
-        if (x == -1 && y == -1) {
-            POINT p; GetCursorPos(&p); x = p.x; y = p.y;
-        }
-        HMENU menu = BuildMenu();
-        SetForegroundWindow(h);
-        int id = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, x, y, h, nullptr);
-        DestroyMenu(menu);
-        switch (id) {
-        case ID_DUR_25:  UiSetDuration(h, 25); break;
-        case ID_DUR_30:  UiSetDuration(h, 30); break;
-        case ID_DUR_45:  UiSetDuration(h, 45); break;
-        case ID_DUR_60:  UiSetDuration(h, 60); break;
-        case ID_DUR_120: UiSetDuration(h, 120); break;
-        case ID_CUSTOM:  ShowCustomPopup(h); break;
-        case ID_QUIT:    DestroyWindow(h); break;
+        case HIT_CLOSE: DestroyWindow(h); break;
+        case HIT_MIN:   ShowWindow(h, SW_MINIMIZE); break;
+        case HIT_TAB0:  UiSelectMode(h, Mode::Focus); break;
+        case HIT_TAB1:  UiSelectMode(h, Mode::ShortBreak); break;
+        case HIT_TAB2:  UiSelectMode(h, Mode::LongBreak); break;
+        case HIT_START: UiToggle(h); break;
+        case HIT_RESET: UiReset(h); break;
         }
         return 0;
     }
@@ -371,16 +405,6 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
     return DefWindowProc(h, m, w, l);
 }
 
-static void LoadEmbeddedFont() {
-    wchar_t exePath[MAX_PATH];
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    wchar_t* slash = wcsrchr(exePath, L'\\');
-    if (slash) *(slash + 1) = 0;
-    wchar_t fontPath[MAX_PATH];
-    wsprintfW(fontPath, L"%sDigitalNumbers-Regular.ttf", exePath);
-    AddFontResourceExW(fontPath, FR_PRIVATE, 0);
-}
-
 int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     g_hinst = hi;
     SetProcessDPIAware();
@@ -388,9 +412,7 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     g_dpi = GetDeviceCaps(sdc, LOGPIXELSX);
     ReleaseDC(nullptr, sdc);
 
-    LoadEmbeddedFont();
     RebuildFonts(1.0);
-    g_fPopup = CreateFontW(-S(14), 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, 0, 0, CLEARTYPE_QUALITY, 0, L"Segoe UI");
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
@@ -399,28 +421,17 @@ int WINAPI WinMain(HINSTANCE hi, HINSTANCE, LPSTR, int) {
     wc.lpszClassName = L"PomoOverlay";
     RegisterClassW(&wc);
 
-    WNDCLASSW pc = {};
-    pc.lpfnWndProc = PopupProc;
-    pc.hInstance = hi;
-    pc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    pc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-    pc.lpszClassName = L"PomoInput";
-    RegisterClassW(&pc);
-
-    g_main = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW, wc.lpszClassName, L"Pomodoro",
-                              WS_POPUP | WS_THICKFRAME, S(60), S(60), S(BASE_W), S(BASE_H),
+    // WS_EX_APPWINDOW (and no WS_EX_TOOLWINDOW) ensures a taskbar button even though this
+    // is a WS_POPUP window, so it can be found/minimized/restored like a normal app.
+    g_main = CreateWindowExW(WS_EX_TOPMOST | WS_EX_APPWINDOW, wc.lpszClassName, L"Pomodoro Desk",
+                              WS_POPUP | WS_THICKFRAME, S(80), S(60), S(BASE_W), S(BASE_H),
                               nullptr, nullptr, hi, nullptr);
-    SetLayeredWindowAttributes(g_main, 0, 250, LWA_ALPHA);
     SetTimer(g_main, 1, 200, nullptr);
-    ShowWindow(g_main, SW_SHOWNOACTIVATE);
+    ShowWindow(g_main, SW_SHOWNORMAL);
     UpdateWindow(g_main);
 
     MSG msg;
     while (GetMessage(&msg, nullptr, 0, 0)) {
-        if (g_popup && msg.message == WM_KEYDOWN) {
-            if (msg.wParam == VK_RETURN) { CommitCustom(); continue; }
-            if (msg.wParam == VK_ESCAPE) { DestroyWindow(g_popup); continue; }
-        }
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }

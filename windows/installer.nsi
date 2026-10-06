@@ -8,7 +8,7 @@
 !define APP_NAME "Pomodoro Desk"
 !define APP_EXE "pomodoro.exe"
 !define APP_PUBLISHER "Bharath"
-!define APP_VERSION "1.2.0"
+!define APP_VERSION "2.0.0"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\PomodoroDesk"
 
 RequestExecutionLevel user
@@ -25,7 +25,6 @@ UninstPage instfiles
 Section "Install"
     SetOutPath "$INSTDIR"
     File "..\dist\pomodoro.exe"
-    File "..\assets\fonts\DigitalNumbers-Regular.ttf"
 
     CreateShortCut "$SMPROGRAMS\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
     CreateShortCut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\${APP_EXE}"
@@ -41,7 +40,6 @@ SectionEnd
 
 Section "Uninstall"
     Delete "$INSTDIR\${APP_EXE}"
-    Delete "$INSTDIR\DigitalNumbers-Regular.ttf"
     Delete "$INSTDIR\Uninstall.exe"
     RMDir "$INSTDIR"
     Delete "$SMPROGRAMS\${APP_NAME}.lnk"

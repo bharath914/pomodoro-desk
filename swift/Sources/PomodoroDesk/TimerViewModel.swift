@@ -5,12 +5,17 @@ import PomodoroCore
 /// Bridges the pure PomodoroCore.TimerEngine to SwiftUI: owns the wall clock and the
 /// repeating tick, and republishes state as @Published properties for the view to bind to.
 final class TimerViewModel: ObservableObject {
-    private let engine = TimerEngine(durationMinutes: 25)
+    private let engine = TimerEngine()
     private var timer: Timer?
 
     @Published var displayText: String = "25:00"
     @Published var startLabel: String = "Start"
+    @Published var modeLabel: String = "Focus"
+    @Published var mode: Mode = .focus
     @Published var isRunning: Bool = false
+    @Published var progress: Double = 0
+    @Published var cyclePosition: Int = 0
+    @Published var completedSessions: Int = 0
 
     init() {
         refresh()
@@ -31,13 +36,27 @@ final class TimerViewModel: ObservableObject {
     }
 
     private func refresh() {
-        let s = engine.secsLeft(now: now())
+        let n = now()
+        let s = engine.secsLeft(now: n)
         displayText = String(format: "%02d:%02d", s / 60, s % 60)
         isRunning = engine.isRunning
+        mode = engine.mode
+        cyclePosition = engine.cyclePosition
+        completedSessions = engine.completedSessions
+
+        let total = Double(TimerEngine.durationForMode(engine.mode))
+        let remain = Double(engine.remainingMs(now: n))
+        progress = total > 0 ? 1.0 - (remain / total) : 0
+
         switch engine.state {
         case .running: startLabel = "Pause"
         case .paused:  startLabel = "Resume"
-        case .done, .ready: startLabel = "Start"
+        case .ready:   startLabel = "Start"
+        }
+        switch engine.mode {
+        case .focus:      modeLabel = "Focus"
+        case .shortBreak: modeLabel = "Short break"
+        case .longBreak:  modeLabel = "Long break"
         }
     }
 
@@ -51,21 +70,8 @@ final class TimerViewModel: ObservableObject {
         refresh()
     }
 
-    func addMinutes(_ m: Int) {
-        engine.addMinutes(m)
+    func selectMode(_ m: Mode) {
+        engine.selectMode(m)
         refresh()
-    }
-
-    func setDuration(_ minutes: Int) {
-        engine.setDuration(minutes: minutes)
-        refresh()
-    }
-
-    func setCustomMinutes(_ raw: Int) {
-        setDuration(clampMinutes(raw))
-    }
-
-    var currentDurationMinutes: Int {
-        engine.durationMinutes
     }
 }

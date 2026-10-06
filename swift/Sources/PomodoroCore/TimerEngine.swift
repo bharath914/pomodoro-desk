@@ -1,36 +1,52 @@
 import Foundation
 
-// Pure countdown-timer logic — no UI, no system clock calls.
+// Pure Pomodoro-cycle logic — no UI, no system clock calls.
 // Every method takes the current time explicitly so it is fully deterministic and testable.
-// This mirrors core/TimerEngine.{h,cpp} in the Windows/Linux builds; keep the semantics in sync.
+// Mirrors core/TimerEngine.{h,cpp} in the Windows/Linux builds; keep the semantics in sync.
 
-public enum TimerState: Equatable {
-    case ready, running, paused, done
+public enum Mode: Hashable {
+    case focus, shortBreak, longBreak
+}
+
+public enum RunState: Equatable {
+    case ready, running, paused
 }
 
 public final class TimerEngine {
-    private var durationMs: Int64
+    private var mode_: Mode = .focus
     private var remainMs: Int64
     private var endTime: Int64 = 0
     public private(set) var isRunning: Bool = false
+    public private(set) var completedSessions: Int = 0
+    public private(set) var cyclePosition: Int = 0  // 0..4 focus sessions completed since the last long break
 
-    public init(durationMinutes: Int = 25) {
-        durationMs = Int64(durationMinutes) * 60_000
-        remainMs = durationMs
+    public init() {
+        remainMs = TimerEngine.durationForMode(.focus)
     }
 
-    public func setDuration(minutes: Int) {
-        durationMs = Int64(minutes) * 60_000
-        reset()
+    public static func durationForMode(_ m: Mode) -> Int64 {
+        switch m {
+        case .focus:      return 25 * 60_000
+        case .shortBreak: return 5 * 60_000
+        case .longBreak:  return 15 * 60_000
+        }
+    }
+
+    public var mode: Mode { mode_ }
+
+    public func selectMode(_ m: Mode) {
+        mode_ = m
+        remainMs = TimerEngine.durationForMode(m)
+        isRunning = false
     }
 
     public func reset() {
-        remainMs = durationMs
+        remainMs = TimerEngine.durationForMode(mode_)
         isRunning = false
     }
 
     public func start(now: Int64) {
-        if remainMs <= 0 { remainMs = durationMs }
+        if remainMs <= 0 { remainMs = TimerEngine.durationForMode(mode_) }
         endTime = now + remainMs
         isRunning = true
     }
@@ -45,27 +61,25 @@ public final class TimerEngine {
         isRunning ? pause(now: now) : start(now: now)
     }
 
-    public func addMinutes(_ minutes: Int) {
-        let add = Int64(minutes) * 60_000
-        if isRunning {
-            endTime += add
-        } else {
-            remainMs = min(max(remainMs + add, 0), Self.maxMs)
-        }
-    }
-
-    private static let maxMs: Int64 = 24 * 60 * 60 * 1000  // sanity cap: 24 hours
-
-    /// Call periodically while running; returns true exactly once, the moment the countdown hits zero.
+    /// Call periodically while running; returns true exactly once, the moment the countdown hits
+    /// zero. By the time it returns, `mode` has already advanced to the next step of the cycle:
+    /// focus -> shortBreak (or longBreak every 4th) -> focus, each session counted and paused,
+    /// ready for the next Start press.
     @discardableResult
     public func update(now: Int64) -> Bool {
-        guard isRunning else { return false }
-        if remainingMs(now: now) <= 0 {
-            isRunning = false
-            remainMs = 0
-            return true
+        guard isRunning, remainingMs(now: now) <= 0 else { return false }
+
+        isRunning = false
+        if mode_ == .focus {
+            completedSessions += 1
+            cyclePosition += 1
+            mode_ = cyclePosition >= 4 ? .longBreak : .shortBreak
+        } else {
+            if mode_ == .longBreak { cyclePosition = 0 }
+            mode_ = .focus
         }
-        return false
+        remainMs = TimerEngine.durationForMode(mode_)
+        return true
     }
 
     public func remainingMs(now: Int64) -> Int64 {
@@ -77,19 +91,9 @@ public final class TimerEngine {
         Int((remainingMs(now: now) + 999) / 1000)
     }
 
-    public var durationMinutes: Int {
-        Int(durationMs / 60_000)
-    }
-
-    public var state: TimerState {
+    public var state: RunState {
         if isRunning { return .running }
-        if remainMs <= 0 { return .done }
-        if remainMs < durationMs { return .paused }
+        if remainMs < TimerEngine.durationForMode(mode_) { return .paused }
         return .ready
     }
-}
-
-/// Clamp a user-entered minute value to the valid [1, 999] range.
-public func clampMinutes(_ raw: Int) -> Int {
-    min(max(raw, 1), 999)
 }

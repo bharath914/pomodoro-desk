@@ -1,24 +1,29 @@
 #include "TimerEngine.h"
 
-namespace {
-constexpr int64_t kMaxMs = 24LL * 60 * 60 * 1000;  // sanity cap: 24 hours
+int64_t TimerEngine::durationForMode(Mode m) {
+    switch (m) {
+    case Mode::Focus:      return 25LL * 60000;
+    case Mode::ShortBreak: return 5LL * 60000;
+    case Mode::LongBreak:  return 15LL * 60000;
+    }
+    return 25LL * 60000;
 }
 
-TimerEngine::TimerEngine(int durationMinutes)
-    : durationMs_(static_cast<int64_t>(durationMinutes) * 60000), remainMs_(durationMs_) {}
+TimerEngine::TimerEngine() : remainMs_(durationForMode(mode_)) {}
 
-void TimerEngine::setDuration(int minutes) {
-    durationMs_ = static_cast<int64_t>(minutes) * 60000;
-    reset();
+void TimerEngine::selectMode(Mode m) {
+    mode_ = m;
+    remainMs_ = durationForMode(m);
+    running_ = false;
 }
 
 void TimerEngine::reset() {
-    remainMs_ = durationMs_;
+    remainMs_ = durationForMode(mode_);
     running_ = false;
 }
 
 void TimerEngine::start(int64_t nowMs) {
-    if (remainMs_ <= 0) remainMs_ = durationMs_;
+    if (remainMs_ <= 0) remainMs_ = durationForMode(mode_);
     endTime_ = nowMs + remainMs_;
     running_ = true;
 }
@@ -35,25 +40,21 @@ void TimerEngine::toggle(int64_t nowMs) {
     else start(nowMs);
 }
 
-void TimerEngine::addMinutes(int minutes) {
-    int64_t add = static_cast<int64_t>(minutes) * 60000;
-    if (running_) {
-        endTime_ += add;
-    } else {
-        remainMs_ += add;
-        if (remainMs_ < 0) remainMs_ = 0;
-        if (remainMs_ > kMaxMs) remainMs_ = kMaxMs;
-    }
-}
-
 bool TimerEngine::update(int64_t nowMs) {
     if (!running_) return false;
-    if (remainingMs(nowMs) <= 0) {
-        running_ = false;
-        remainMs_ = 0;
-        return true;
+    if (remainingMs(nowMs) > 0) return false;
+
+    running_ = false;
+    if (mode_ == Mode::Focus) {
+        sessionCount_++;
+        cyclePos_++;
+        mode_ = (cyclePos_ >= 4) ? Mode::LongBreak : Mode::ShortBreak;
+    } else {
+        if (mode_ == Mode::LongBreak) cyclePos_ = 0;
+        mode_ = Mode::Focus;
     }
-    return false;
+    remainMs_ = durationForMode(mode_);
+    return true;
 }
 
 int64_t TimerEngine::remainingMs(int64_t nowMs) const {
@@ -65,15 +66,8 @@ int TimerEngine::secsLeft(int64_t nowMs) const {
     return static_cast<int>((remainingMs(nowMs) + 999) / 1000);
 }
 
-TimerState TimerEngine::state() const {
-    if (running_) return TimerState::Running;
-    if (remainMs_ <= 0) return TimerState::Done;
-    if (remainMs_ < durationMs_) return TimerState::Paused;
-    return TimerState::Ready;
-}
-
-int ClampMinutes(int raw) {
-    if (raw < 1) return 1;
-    if (raw > 999) return 999;
-    return raw;
+RunState TimerEngine::state() const {
+    if (running_) return RunState::Running;
+    if (remainMs_ < durationForMode(mode_)) return RunState::Paused;
+    return RunState::Ready;
 }

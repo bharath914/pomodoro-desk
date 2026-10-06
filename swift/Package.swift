@@ -6,11 +6,7 @@ let package = Package(
     platforms: [.macOS(.v12)],
     targets: [
         .target(name: "PomodoroCore"),
-        .executableTarget(
-            name: "PomodoroDesk",
-            dependencies: ["PomodoroCore"],
-            resources: [.process("Resources")]
-        ),
+        .executableTarget(name: "PomodoroDesk", dependencies: ["PomodoroCore"]),
         .testTarget(name: "PomodoroCoreTests", dependencies: ["PomodoroCore"]),
     ]
 )
